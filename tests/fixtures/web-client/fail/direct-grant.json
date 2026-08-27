@@ -1,0 +1,37 @@
+{
+  "_case": "Password grant enabled on the workspace client.",
+  "_expect": {
+    "policy": "web",
+    "reject_with": "flow-direct-grant"
+  },
+  "expected": {
+    "clientId": "dotmac-workspace",
+    "enabled": true,
+    "redirect_uris": [
+      "https://workspace.dotmac.io/login/callback"
+    ]
+  },
+  "client": {
+    "clientId": "dotmac-workspace",
+    "name": "Dotmac Workspace",
+    "description": "Confidential server-side relying party for workspace.dotmac.io. Its security model rests on a server-held secret, an HttpOnly cookie and a server-side single-use state store, which is exactly why ADR-0069 §4 refuses to ship this client class to a device. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md.",
+    "protocol": "openid-connect",
+    "enabled": true,
+    "publicClient": false,
+    "bearerOnly": false,
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": true,
+    "serviceAccountsEnabled": false,
+    "fullScopeAllowed": false,
+    "redirectUris": [
+      "https://workspace.dotmac.io/login/callback"
+    ],
+    "webOrigins": [],
+    "attributes": {
+      "pkce.code.challenge.method": "S256",
+      "id.token.signed.response.alg": "RS256",
+      "post.logout.redirect.uris": ""
+    }
+  }
+}

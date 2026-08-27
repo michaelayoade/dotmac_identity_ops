@@ -1,0 +1,23 @@
+{
+  "_readme": [
+    "PARTIAL realm desired state for `dotmac`. Deliberately partial.",
+    "",
+    "A FULL Keycloak realm export is NOT committed here and must never be: it",
+    "carries the realm's signing keys, client secrets and credential material.",
+    "The rule from the owner is absolute — no secret value in any file — and a",
+    "realm export is the easiest way to break it by accident.",
+    "",
+    "The footprint of this file is deliberately identical to the footprint of",
+    "the policies in policy/: this repository declares exactly what it asserts,",
+    "and everything else about the realm is named in docs/HOST-IMPORT-TODO.md",
+    "as an unreconciled region rather than silently implied to be correct.",
+    "",
+    "The issuer is PERMANENT. It is written into every",
+    "`external_identity_bindings.issuer` row in every relying party, so changing",
+    "it orphans every binding rather than renaming them."
+  ],
+  "realm": "dotmac",
+  "enabled": true,
+  "sslRequired": "all",
+  "bruteForceProtected": true
+}

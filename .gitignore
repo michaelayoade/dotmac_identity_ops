@@ -1,0 +1,24 @@
+# Runtime material. NEVER committed. bin/check-no-secrets.sh is the second line
+# of defence behind this file; treat neither as optional.
+.env
+.env.*
+*.env
+!.env.example
+.env.secrets
+kcadm.config
+*.pem
+*.key
+*.p12
+*.jks
+
+# Backups, dumps and exports carry credential material by construction.
+*.dump
+*.sql
+*.sql.gz
+*.age
+realm-export*.json
+*-realm-export.json
+
+# The host export landing zone is reviewed OUTSIDE this repository and only
+# reconciled INTO it file by file.
+inbox/

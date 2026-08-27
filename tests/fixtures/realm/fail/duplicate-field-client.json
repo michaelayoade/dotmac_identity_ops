@@ -1,0 +1,209 @@
+{
+  "_case": "The field client id appears twice. Two objects answering to one client id means an authorization request may be served by whichever one the lookup happens to return, and only one of them was reviewed.",
+  "_expect": {
+    "policy": "realm",
+    "reject_with": "inventory-duplicate"
+  },
+  "manifest": {
+    "_readme": [
+      "The client INVENTORY of the `dotmac` realm. This file answers exactly one",
+      "question: WHICH clients may exist. It answers nothing about their shape —",
+      "that belongs to the class policies in policy/.",
+      "",
+      "`class` dispatches the shape policy:",
+      "  mobile-native    -> policy/verify-mobile-client.jq",
+      "  confidential-web -> policy/verify-web-client.jq",
+      "  keycloak-builtin -> presence only; see the STATED PREMISE in",
+      "                      policy/verify-realm-clients.jq and docs/POLICY.md.",
+      "",
+      "`provenance` records where the declaration came from. `authored-from-spec`",
+      "means it was written from ADR-0069 and has NOT been reconciled against the",
+      "live realm; every such entry is listed in docs/HOST-IMPORT-TODO.md and must",
+      "be reconciled before this repository can claim to describe the live host.",
+      "",
+      "NO SECRET VALUE EVER APPEARS HERE. Client secrets live only in OpenBao;",
+      "see docs/SECRETS.md for the paths."
+    ],
+    "realm": "dotmac",
+    "issuer": "https://idp.dotmac.io/realms/dotmac",
+    "clients": [
+      {
+        "clientId": "io.dotmac.field",
+        "class": "mobile-native",
+        "enabled": false,
+        "redirect_uris": [],
+        "web_origins": [],
+        "desired_state_file": "realm/clients/io.dotmac.field.json",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null,
+        "rollout_gate": [
+          "ADR-0069 § 7 and inventory finding R1: field_mobile has NO verified deep",
+          "link on either platform — no intent-filter beyond MAIN/LAUNCHER on",
+          "Android and no CFBundleURLTypes key at all on iOS. Until an exact,",
+          "verified App Link and Universal Link exist AND the dotmac_sub exchange",
+          "endpoint exists, this client stays DISABLED with zero redirect URIs.",
+          "Enabling it is Wave 10, not this wave. The `rollout-enabled` assertion",
+          "in policy/verify-mobile-client.jq is what makes that a guard rather",
+          "than an intention."
+        ]
+      },
+      {
+        "clientId": "dotmac-workspace",
+        "class": "confidential-web",
+        "enabled": true,
+        "redirect_uris": [
+          "https://workspace.dotmac.io/login/callback"
+        ],
+        "web_origins": [],
+        "desired_state_file": "realm/clients/dotmac-workspace.json",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null,
+        "note": [
+          "The workspace relying party. Declared here so that the inventory check",
+          "is not vacuous: without it, the live realm's real workspace client would",
+          "read as an `inventory-unknown` failure. Its shape assertions are the",
+          "confidential-web ones and are narrower than the mobile ones by design."
+        ]
+      },
+      {
+        "clientId": "account",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      },
+      {
+        "clientId": "account-console",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      },
+      {
+        "clientId": "admin-cli",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      },
+      {
+        "clientId": "broker",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      },
+      {
+        "clientId": "realm-management",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      },
+      {
+        "clientId": "security-admin-console",
+        "class": "keycloak-builtin",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null
+      }
+    ]
+  },
+  "realm_clients": [
+    {
+      "clientId": "io.dotmac.field",
+      "name": "Dotmac Field (native, pre-rollout)",
+      "description": "Public native OIDC client for the field_mobile artifact. DISABLED until a verified App Link and Universal Link exist (ADR-0069 §7 / R1) and the dotmac_sub ID-token exchange endpoint exists (ADR-0069 §3). The client id matches the Android application id and the iOS bundle id, because ADR-0069 §2 makes a client per ARTIFACT identity.",
+      "protocol": "openid-connect",
+      "enabled": false,
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "id.token.signed.response.alg": "RS256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "post.logout.redirect.uris": ""
+      }
+    },
+    {
+      "clientId": "dotmac-workspace",
+      "name": "Dotmac Workspace",
+      "description": "Confidential server-side relying party for workspace.dotmac.io. Its security model rests on a server-held secret, an HttpOnly cookie and a server-side single-use state store, which is exactly why ADR-0069 §4 refuses to ship this client class to a device. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md.",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [
+        "https://workspace.dotmac.io/login/callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "id.token.signed.response.alg": "RS256",
+        "post.logout.redirect.uris": ""
+      }
+    },
+    {
+      "clientId": "account",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "account-console",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "admin-cli",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "broker",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "realm-management",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "security-admin-console",
+      "protocol": "openid-connect",
+      "enabled": true
+    },
+    {
+      "clientId": "io.dotmac.field",
+      "name": "Dotmac Field (native, pre-rollout)",
+      "description": "Public native OIDC client for the field_mobile artifact. DISABLED until a verified App Link and Universal Link exist (ADR-0069 §7 / R1) and the dotmac_sub ID-token exchange endpoint exists (ADR-0069 §3). The client id matches the Android application id and the iOS bundle id, because ADR-0069 §2 makes a client per ARTIFACT identity.",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": false,
+      "authorizationServicesEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "id.token.signed.response.alg": "RS256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "post.logout.redirect.uris": ""
+      }
+    }
+  ]
+}

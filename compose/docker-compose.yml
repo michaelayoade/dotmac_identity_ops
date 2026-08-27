@@ -1,0 +1,84 @@
+# Keycloak control plane — Compose configuration.
+#
+# PROVENANCE: authored from specification. It has NOT yet been reconciled
+# against the raw compose file on the IdP host. Until it has, this file
+# describes the INTENDED shape, not a verified copy of what is running.
+# See docs/HOST-IMPORT-TODO.md, item 1.
+#
+# NO SECRET VALUE APPEARS HERE, and none may -- nor any OpenBao location, which
+# is estate topology rather than repository content. Every credential arrives
+# through an environment file that bin/deploy.sh renders at deploy time from the
+# location BAO_KEYCLOAK_PATH names, and removes afterwards; `.env` is gitignored
+# and bin/check-no-secrets.sh refuses a tree that contains one. See
+# docs/SECRETS.md.
+#
+# Every environment-specific value is an overridable knob with a documented
+# default (see .env.example). `${VAR:?}` is used for the values that have no
+# safe default: an unset database password must stop the deployment, not start
+# a server with a guess.
+
+name: ${KC_COMPOSE_PROJECT:-keycloak}
+
+services:
+  postgres:
+    # This database holds the realm's signing keys and every credential. It is
+    # deliberately LOCAL to the IdP host rather than on the shared primary:
+    # compromising it elsewhere would yield the ability to mint valid tokens for
+    # any user against any relying party, and an IdP that cannot answer while a
+    # shared database host is down makes that host a single point of failure for
+    # all authentication across the fleet.
+    image: "${KC_DB_IMAGE:-postgres}:${KC_DB_VERSION:-16}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${KC_DB_NAME:?set KC_DB_NAME; bin/deploy.sh renders it from the OpenBao location named by BAO_KEYCLOAK_PATH, field db_name}
+      POSTGRES_USER: ${KC_DB_USER:?set KC_DB_USER; bin/deploy.sh renders it from the OpenBao location named by BAO_KEYCLOAK_PATH, field db_user}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?set KC_DB_PASSWORD; bin/deploy.sh renders it from the OpenBao location named by BAO_KEYCLOAK_PATH, field db_password}
+    volumes:
+      - kc-postgres-data:/var/lib/postgresql/data
+    # Loopback only. A docker-published port bypasses ufw entirely, so binding
+    # to 0.0.0.0 would make "the firewall allows only 22/80/443" false the
+    # moment the container started.
+    ports:
+      - "${KC_DB_BIND:-127.0.0.1}:${KC_DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: ${KC_DB_HEALTH_INTERVAL:-10s}
+      timeout: ${KC_DB_HEALTH_TIMEOUT:-5s}
+      retries: ${KC_DB_HEALTH_RETRIES:-12}
+
+  keycloak:
+    image: "${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak}:${KEYCLOAK_VERSION:-26.0.7}"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # `start`, deliberately NOT `start --optimized`. The optimized mode requires
+    # the image to have been produced by a prior `kc.sh build`; switching this
+    # line without also changing how the image is built is a boot failure, and
+    # it has caught people before. Treat it as an image-build invariant rather
+    # than a runbook note.
+    command: ["start"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${KC_DB_NAME:?}
+      KC_DB_USERNAME: ${KC_DB_USER:?}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?}
+      # PERMANENT. The issuer is written into every
+      # external_identity_bindings.issuer row in every relying party, so
+      # changing it orphans every binding rather than renaming them.
+      KC_HOSTNAME: ${KC_HOSTNAME:-https://idp.dotmac.io}
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: ${KC_PROXY_HEADERS:-xforwarded}
+      KC_HEALTH_ENABLED: "true"
+      KC_LOG_LEVEL: ${KC_LOG_LEVEL:-info}
+      # KC_BOOTSTRAP_ADMIN_USERNAME / KC_BOOTSTRAP_ADMIN_PASSWORD are
+      # deliberately ABSENT. They are bootstrap-only by design, and an admin
+      # password left in a container environment is one `docker inspect` away
+      # from anyone with socket access. They were removed on the live host once
+      # the admin account was confirmed persisted; do not reintroduce them.
+    ports:
+      - "${KC_HTTP_BIND:-127.0.0.1}:${KC_HTTP_PORT:-8080}:8080"
+
+volumes:
+  kc-postgres-data:
+    name: ${KC_DB_VOLUME:-keycloak_kc-postgres-data}

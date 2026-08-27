@@ -1,0 +1,36 @@
+{
+  "_case": "The device authorization grant turned on. Authorization Code must be the ONLY enabled interactive flow, and Keycloak carries more grant toggles than the four obvious ones.",
+  "_expect": {
+    "policy": "mobile",
+    "reject_with": "flow-device"
+  },
+  "expected": {
+    "clientId": "io.dotmac.field",
+    "enabled": false,
+    "redirect_uris": []
+  },
+  "client": {
+    "clientId": "io.dotmac.field",
+    "name": "Dotmac Field (native, pre-rollout)",
+    "description": "Public native OIDC client for the field_mobile artifact. DISABLED until a verified App Link and Universal Link exist (ADR-0069 §7 / R1) and the dotmac_sub ID-token exchange endpoint exists (ADR-0069 §3). The client id matches the Android application id and the iOS bundle id, because ADR-0069 §2 makes a client per ARTIFACT identity.",
+    "protocol": "openid-connect",
+    "enabled": false,
+    "publicClient": true,
+    "bearerOnly": false,
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": false,
+    "authorizationServicesEnabled": false,
+    "fullScopeAllowed": false,
+    "redirectUris": [],
+    "webOrigins": [],
+    "attributes": {
+      "pkce.code.challenge.method": "S256",
+      "id.token.signed.response.alg": "RS256",
+      "oauth2.device.authorization.grant.enabled": "true",
+      "oidc.ciba.grant.enabled": "false",
+      "post.logout.redirect.uris": ""
+    }
+  }
+}

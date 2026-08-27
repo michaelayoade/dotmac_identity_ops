@@ -1,0 +1,38 @@
+# The fixture ratchet. Two-directional: tests/run-policy-tests.sh fails when a
+# fixture exists on disk without a line here AND when a line here has no
+# fixture on disk. Deleting an inconvenient sensitivity fixture is therefore a
+# CI failure, not a quiet loss of coverage.
+#
+# Column 3 is ACCEPT, or the exact `FAIL <code>` the fixture must be rejected
+# with. A rejection for the wrong reason is not a pass: a wildcard fixture that
+# failed because someone typo'd its clientId would prove nothing about
+# wildcards.
+#
+# policy	fixture	expectation
+mobile	tests/fixtures/mobile-client/pass/disabled-pre-rollout.json	ACCEPT
+mobile	tests/fixtures/mobile-client/pass/enabled-hardened.json	ACCEPT
+mobile	tests/fixtures/mobile-client/fail/direct-grant-enabled.json	flow-direct-grant
+mobile	tests/fixtures/mobile-client/fail/implicit-enabled.json	flow-implicit
+mobile	tests/fixtures/mobile-client/fail/plain-pkce.json	pkce
+mobile	tests/fixtures/mobile-client/fail/pkce-unset.json	pkce
+mobile	tests/fixtures/mobile-client/fail/wildcard-redirect.json	redirect-wildcard
+mobile	tests/fixtures/mobile-client/fail/confidential-client.json	public
+mobile	tests/fixtures/mobile-client/fail/service-accounts-enabled.json	flow-service-account
+mobile	tests/fixtures/mobile-client/fail/full-scope-enabled.json	full-scope
+mobile	tests/fixtures/mobile-client/fail/web-origins-present.json	web-origins
+mobile	tests/fixtures/mobile-client/fail/prematurely-enabled.json	rollout-enabled
+mobile	tests/fixtures/mobile-client/fail/disabled-with-redirect.json	rollout-redirect
+mobile	tests/fixtures/mobile-client/fail/custom-scheme-redirect.json	redirect-unverified-scheme
+mobile	tests/fixtures/mobile-client/fail/hs256-id-token.json	id-token-alg
+mobile	tests/fixtures/mobile-client/fail/device-grant-enabled.json	flow-device
+mobile	tests/fixtures/mobile-client/fail/redirect-not-in-desired-set.json	redirect-set
+web	tests/fixtures/web-client/pass/hardened.json	ACCEPT
+web	tests/fixtures/web-client/fail/public-web-client.json	confidential
+web	tests/fixtures/web-client/fail/wildcard-redirect.json	redirect-wildcard
+web	tests/fixtures/web-client/fail/direct-grant.json	flow-direct-grant
+web	tests/fixtures/web-client/fail/plain-pkce.json	pkce
+realm	tests/fixtures/realm/pass/baseline.json	ACCEPT
+realm	tests/fixtures/realm/fail/unknown-client.json	inventory-unknown
+realm	tests/fixtures/realm/fail/missing-field-client.json	inventory-missing
+realm	tests/fixtures/realm/fail/duplicate-field-client.json	inventory-duplicate
+realm	tests/fixtures/realm/fail/empty-realm.json	inventory-empty

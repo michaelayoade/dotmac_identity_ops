@@ -1,0 +1,124 @@
+name: keycloak-policy
+
+# The offline gate. It evaluates committed JSON with jq and a shell — no
+# Keycloak, no database, no container, no network. That is deliberate: the live
+# verifier can only run where a real realm is reachable, so a guard that lived
+# only there would never gate a pull request, and a guard that never runs on a
+# pull request is documentation.
+#
+# What a green run means, precisely: the committed desired state satisfies the
+# policy AND every deliberately-unsafe fixture was REJECTED, each for its own
+# declared reason. A run that accepted everything cannot be green — the
+# sensitivity job fails when a `fail/` fixture is accepted, when it is rejected
+# for the wrong reason, and when the fixture set itself has shrunk.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sensitivity:
+    name: policy + sensitivity proof (offline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tool versions
+        run: |
+          jq --version
+          bash --version | head -1
+
+      - name: jq policy programs compile
+        # A jq program with a syntax error exits 5 and prints nothing, which
+        # would otherwise be indistinguishable from "the policy found no
+        # violations". Each program is compiled against a trivially-typed input
+        # so a compile failure is caught on its own, before any fixture runs.
+        run: |
+          set -euo pipefail
+          echo '{}' | jq --argjson expected '{}' -f policy/verify-mobile-client.jq >/dev/null
+          echo '{}' | jq --argjson expected '{}' -f policy/verify-web-client.jq >/dev/null
+          echo '[]' | jq --argjson manifest '{"clients":[]}' -f policy/verify-realm-clients.jq >/dev/null
+          echo "all three policy programs compile"
+
+      - name: Secret scanner self-test
+        # Prove the scanner rejects before trusting it to report clean.
+        run: ./bin/check-no-secrets.sh --self-test
+
+      - name: No committed secret value
+        run: ./bin/check-no-secrets.sh
+
+      - name: Offline policy gate
+        # Desired-state consistency + the sensitivity proof.
+        run: ./bin/check-policy.sh
+
+      - name: Restate what green means
+        run: |
+          echo "Green means: unsafe fixtures were REJECTED, each for its declared reason."
+          echo "It does NOT mean unsafe configuration was accepted into the desired state."
+
+  fixture-tamper-canary:
+    name: the guard bites (canary)
+    runs-on: ubuntu-latest
+    # A policy check that has never failed in CI is a policy check nobody has
+    # confirmed can fail in CI. This job MUTATES a copy of the desired state in
+    # the runner's workspace — never the repository — and asserts the gate goes
+    # red. If this job passes while `sensitivity` also passes, the guard is
+    # demonstrably live rather than merely present.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enabling the pre-rollout field client must fail the gate
+        run: |
+          set -euo pipefail
+          jq '.enabled = true' realm/clients/io.dotmac.field.json > /tmp/tampered.json
+          mv /tmp/tampered.json realm/clients/io.dotmac.field.json
+          if ./bin/check-policy.sh > /tmp/out.txt 2>&1; then
+            echo "CANARY FAILED: the gate accepted an enabled pre-rollout client."
+            cat /tmp/out.txt
+            exit 1
+          fi
+          grep -q 'rollout-enabled' /tmp/out.txt || {
+            echo "CANARY FAILED: the gate went red, but not for the rollout reason."
+            cat /tmp/out.txt
+            exit 1
+          }
+          echo "canary ok: enabling io.dotmac.field turns the gate red for rollout-enabled"
+
+      - name: Downgrading PKCE to plain must fail the gate
+        run: |
+          set -euo pipefail
+          git checkout -- realm/clients/io.dotmac.field.json
+          jq '.attributes["pkce.code.challenge.method"] = "plain"' \
+            realm/clients/io.dotmac.field.json > /tmp/t.json
+          mv /tmp/t.json realm/clients/io.dotmac.field.json
+          if ./bin/check-policy.sh > /tmp/out.txt 2>&1; then
+            echo "CANARY FAILED: the gate accepted plain PKCE."
+            cat /tmp/out.txt
+            exit 1
+          fi
+          grep -q 'FAIL pkce:' /tmp/out.txt || {
+            echo "CANARY FAILED: red, but not for the PKCE reason."
+            cat /tmp/out.txt
+            exit 1
+          }
+          echo "canary ok: plain PKCE turns the gate red for pkce"
+
+  shell:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          shellcheck -S warning bin/*.sh tests/*.sh
