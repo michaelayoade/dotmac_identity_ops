@@ -73,8 +73,12 @@ echo "== 2. offline policy gate =="
 echo
 echo "== 3. operator configuration =="
 if [ -r "$CONFIG_ENV_FILE" ]; then
-	# shellcheck disable=SC1090
 	set -a
+	# The path is an operator knob, so it cannot be constant and ShellCheck
+	# cannot follow it. The directive has to sit on the `.` itself: a
+	# directive applies to the NEXT command, so above `set -a` it silently
+	# covered the wrong line.
+	# shellcheck source=/dev/null
 	. "$CONFIG_ENV_FILE"
 	set +a
 	echo "ok    loaded $CONFIG_ENV_FILE"
@@ -118,8 +122,10 @@ trap cleanup EXIT
 # The names are logged. The values never are.
 echo "ok    rendered $(grep -c '^KC_' "$SECRET_ENV_FILE") knobs from $BAO_KEYCLOAK_PATH (names only: $(grep -o '^KC_[A-Z_]*' "$SECRET_ENV_FILE" | tr '\n' ' '))"
 
-# shellcheck disable=SC1090
 set -a
+# Rendered at deploy time from OpenBao; never a constant path. Same placement
+# rule as step 3 above.
+# shellcheck source=/dev/null
 . "$SECRET_ENV_FILE"
 set +a
 
