@@ -36,8 +36,12 @@ echo "ok    sshd config valid"
 
 echo "== 3. packages =="
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq fail2ban unattended-upgrades nftables >/dev/null
+# A freshly booted cloud node runs its own apt jobs (cloud-init, the apt daily
+# timer, unattended-upgrades). Racing them fails intermittently and waiting for
+# the lock to "clear" loses the race to the next job. Ask apt to WAIT instead.
+APT_WAIT="-o DPkg::Lock::Timeout=900"
+apt-get $APT_WAIT update -qq
+apt-get $APT_WAIT install -y -qq fail2ban unattended-upgrades nftables >/dev/null
 echo "ok    fail2ban, unattended-upgrades, nftables"
 
 echo "== 4. fail2ban, matching the fleet (nftables + systemd backend) =="
