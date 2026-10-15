@@ -1,0 +1,129 @@
+# Alert rules for the IdP HA cluster (H4). Metric names come from
+# bin/idpha-collect.sh. Rules that depend on an unconfirmed Keycloak metric name
+# or on the VIP existing (after the cutover) say so in their annotation and ship
+# with a `phase` label so the monitoring host can mute them until then.
+groups:
+  - name: idpha-cluster
+    rules:
+      - alert: IdpHaLeaderCountWrong
+        expr: sum(idpha_patroni_is_leader) != 1
+        for: 1m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "Patroni leader count is not 1"
+      - alert: IdpHaFailover
+        expr: changes(idpha_patroni_timeline[10m]) > 0
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Patroni timeline changed (a failover or switchover happened)"
+      - alert: IdpHaFailoverRepeated
+        expr: sum(changes(idpha_patroni_timeline[24h])) > 1
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "More than one Patroni timeline change in 24 h (the H-F1 pattern)"
+      - alert: IdpHaReplicationLag
+        expr: max(idpha_patroni_lag_bytes) > 1e6
+        for: 2m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Replication lag above 1 MB"
+      - alert: IdpHaNoSyncStandby
+        expr: sum(idpha_patroni_is_sync_standby) == 0
+        for: 5m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "No synchronous standby (D-H2): replication degraded to asynchronous"
+      - alert: IdpHaEtcdQuorumDegraded
+        expr: min(idpha_etcd_members_healthy) < 3
+        for: 2m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "etcd has fewer than 3 healthy members"
+      - alert: IdpHaEtcdQuorumAtRisk
+        expr: min(idpha_etcd_members_healthy) < 2
+        for: 1m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "etcd has fewer than 2 healthy members: quorum lost or about to be"
+      - alert: IdpHaEtcdNoLeader
+        expr: min(idpha_etcd_has_leader) == 0
+        for: 1m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "etcd reports no single leader"
+      - alert: IdpHaKeepalivedDown
+        expr: idpha_keepalived_active == 0
+        for: 1m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "keepalived is not active on {{ $labels.node }} (the H-F2 class)"
+      - alert: IdpHaVipHolderCount
+        expr: sum(idpha_vip_present) != 1
+        for: 1m
+        labels: {severity: critical, phase: post-cutover}
+        annotations:
+          summary: "The VIP is held by {{ $value }} nodes, not 1"
+      - alert: IdpHaKeycloakNotReady
+        expr: idpha_keycloak_ready == 0
+        for: 5m
+        labels: {severity: warning, phase: running}
+        annotations:
+          summary: "Keycloak is not ready on {{ $labels.node }}"
+      - alert: IdpHaInfinispanViewShort
+        expr: idpha_keycloak_cluster_size < 3
+        for: 5m
+        labels: {severity: warning, phase: running}
+        annotations:
+          summary: "Infinispan view smaller than 3 on {{ $labels.node }} (metric name to confirm in H5.0)"
+      - alert: IdpHaCertExpirySoon
+        expr: (idpha_cert_not_after_seconds - time()) < 21 * 86400
+        for: 10m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Certificate {{ $labels.name }} on {{ $labels.node }} expires in under 21 days"
+      - alert: IdpHaCertExpiryImminent
+        expr: (idpha_cert_not_after_seconds - time()) < 7 * 86400
+        for: 10m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "Certificate {{ $labels.name }} on {{ $labels.node }} expires in under 7 days"
+      - alert: IdpHaFirewallOff
+        expr: idpha_ufw_active == 0
+        for: 2m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "ufw is not active on {{ $labels.node }}"
+      - alert: IdpHaMaintenanceOverdue
+        expr: idpha_needrestart_pending > 0 or idpha_reboot_required == 1
+        for: 8d
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Restarts or a reboot have been pending on {{ $labels.node }} for 8 days"
+      - alert: IdpHaWireguardPeerStale
+        expr: idpha_wg_handshake_age_seconds > 300
+        for: 2m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "WireGuard peer {{ $labels.peer }} on {{ $labels.node }} has no handshake for 5 minutes"
+      - alert: IdpHaBackupStale
+        expr: time() - max(idpha_backup_last_success_seconds) > 2 * 3600
+        labels: {severity: critical, phase: post-h3}
+        annotations:
+          summary: "No successful HA backup upload in 2 hours (the validator's last-valid age is the stronger signal and is alerted by the monitoring host)"
+      - alert: IdpHaCollectorBlind
+        expr: idpha_collect_check_ok == 0
+        for: 10m
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Collector cannot take check {{ $labels.check }} on {{ $labels.node }}"
+      - alert: IdpHaCollectorStale
+        expr: time() - idpha_collect_timestamp_seconds > 300
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "Collector output on {{ $labels.node }} is older than 5 minutes"
+      - alert: IdpHaScrapeDown
+        expr: up{job="idpha"} == 0
+        for: 5m
+        labels: {severity: critical, phase: always}
+        annotations:
+          summary: "Cannot scrape {{ $labels.instance }}"

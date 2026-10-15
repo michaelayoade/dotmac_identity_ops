@@ -1,0 +1,34 @@
+# http-context pieces for an IdP HA node (conf.d). Rendered by bin/ha-install.sh.
+#
+# CLOSED BY DEFAULT: a request for any name that is not an explicitly listed
+# vhost gets no answer on :80 and no certificate on :443. Adding a name is a
+# reviewed change to ha/nginx/idpha-vhosts.conf.tmpl, never an accident of
+# nginx picking the first server block.
+
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    return 444;
+}
+
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    server_name _;
+    ssl_reject_handshake on;
+}
+
+# ACME HTTP-01 peer fallback (D-H4). Whichever node holds the VIP answers for
+# any node's challenge: a miss is retried ONCE against the two peers over the
+# overlay. The peers answer from their own webroot only (X-Acme-Hop guard in the
+# vhost), so there is no proxy loop.
+upstream acme_peers {
+    server @@PEER_OVERLAY_1@@:80 max_fails=0;
+    server @@PEER_OVERLAY_2@@:80 max_fails=0;
+}
+
+# Gate + metrics-token maps live in separate files so the gate can be swapped
+# between closed and open without touching anything else.
+include /etc/nginx/snippets/idpha-gate.conf;
+include /etc/nginx/snippets/idpha-metrics-token.conf;

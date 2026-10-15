@@ -1,0 +1,116 @@
+# IdP HA vhosts. Rendered by bin/ha-install.sh. Parity target: the standard
+# vhost of the single IdP host, plus the HA additions (gate, ACME peers, metrics).
+
+# ---- :80 ------------------------------------------------------------------
+server {
+    listen 80;
+    listen [::]:80;
+    server_name @@KC_HOSTNAME@@ @@LINKS_HOSTNAME@@;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+        try_files $uri @acme_peers;
+    }
+
+    # One hop only. A request that already came from a peer is answered from
+    # this node's webroot or not at all.
+    location @acme_peers {
+        if ($http_x_acme_hop) { return 404; }
+        proxy_pass http://acme_peers;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Acme-Hop 1;
+        proxy_next_upstream error timeout http_404;
+        proxy_next_upstream_tries 2;
+        proxy_connect_timeout 3s;
+    }
+
+    location / { return 301 https://$host$request_uri; }
+}
+
+# ---- identity provider -----------------------------------------------------
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name @@KC_HOSTNAME@@;
+
+    ssl_certificate     @@IDP_CERT_DIR@@/fullchain.pem;
+    ssl_certificate_key @@IDP_CERT_DIR@@/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate @@IDP_CERT_DIR@@/chain.pem;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    client_max_body_size 1m;
+
+    # The admin console is never public (S0 R1). 404 for everyone, gate or not.
+    location = /admin { return 404; }
+    location /admin/ { return 404; }
+
+    # Read-only metrics for the monitoring host (H4): source allowlist AND a
+    # bearer value. Works in closed and open gate mode.
+    location = /_dotmac/metrics {
+@@METRICS_ALLOW_LINES@@
+        deny all;
+        if ($idpha_metrics_ok = 0) { return 403; }
+        proxy_pass http://127.0.0.1:9100/metrics;
+    }
+
+    location / {
+        if ($idp_gate = 0) { return 503; }
+
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Port  443;
+
+        proxy_connect_timeout 10s;
+        proxy_send_timeout    60s;
+        proxy_read_timeout    60s;
+        proxy_buffering       off;
+    }
+}
+
+# ---- app-link association host ----------------------------------------------
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name @@LINKS_HOSTNAME@@;
+
+    ssl_certificate     @@LINKS_CERT_DIR@@/fullchain.pem;
+    ssl_certificate_key @@LINKS_CERT_DIR@@/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_session_tickets off;
+
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    root @@LINKS_ROOT@@;
+
+    # Association documents are not published yet (identity placeholders
+    # unresolved): an explicit 503, never a guess.
+    location /.well-known/ {
+        default_type application/json;
+        return 503 "{\"error\":\"association documents not yet published - identity placeholders unresolved\"}";
+    }
+    location = /oidc/field/callback { try_files /oidc/field/callback.html =404; }
+    location / { return 404; }
+}

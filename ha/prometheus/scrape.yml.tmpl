@@ -1,0 +1,19 @@
+# Prometheus scrape job for the IdP HA nodes (H4). Merge into the monitoring
+# host's configuration; render with the node list from the private values.
+#   @@HA_NODE_TARGETS@@   YAML list items, one per node:  "<address>:443"
+#   @@HA_SNI@@            the identity hostname (TLS server name)
+#   @@HA_BEARER_FILE@@    path of the root-600 file holding the bearer value on the monitoring host
+scrape_configs:
+  - job_name: idpha
+    scheme: https
+    metrics_path: /_dotmac/metrics
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    tls_config:
+      server_name: @@HA_SNI@@
+    authorization:
+      type: Bearer
+      credentials_file: @@HA_BEARER_FILE@@
+    static_configs:
+      - targets:
+@@HA_NODE_TARGETS@@

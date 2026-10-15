@@ -1,0 +1,9 @@
+[Unit]
+Description=IdP HA node metrics collector (writes the node_exporter textfile)
+
+[Service]
+Type=oneshot
+ExecStart=@@HA_DIR@@/bin/idpha-collect.sh --apply
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true

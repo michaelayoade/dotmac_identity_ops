@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly Keycloak HA database backup (installed DISABLED until packet H3.5)
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+Unit=keycloak-ha-backup.service
+
+[Install]
+WantedBy=timers.target

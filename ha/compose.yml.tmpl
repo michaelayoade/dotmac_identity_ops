@@ -1,0 +1,47 @@
+# Keycloak on an IdP HA node. Rendered by bin/ha-install.sh from this template:
+#   @@KC_IMAGE_REF@@     from ha/image.pin (digest-pinned, D-H11)
+#   @@HA_DIR@@           the node-local deployment directory (private value)
+#   @@OVERLAY_ADDR@@     this node's overlay address (private value)
+#   @@KC_DB_PASSWORD_LINE@@  the node's EXISTING password line, copied verbatim; the
+#                        value is never read into a log, a variable that is
+#                        printed, or this repository.
+# Do not run `docker compose config` against the rendered file: it interpolates.
+services:
+  keycloak:
+    image: @@KC_IMAGE_REF@@
+    container_name: keycloak
+    restart: unless-stopped
+    # Host networking: JGroups binds the overlay address directly and the DB is
+    # reached through the node's own HAProxy on loopback.
+    network_mode: host
+    command: ["start"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: "jdbc:postgresql://127.0.0.1:5000/keycloak"
+      KC_DB_USERNAME: keycloak
+      @@KC_DB_PASSWORD_LINE@@
+      # Identical on every node and on the retiring single host. A differing
+      # issuer would orphan every external_identity_bindings row.
+      KC_HOSTNAME: "https://@@KC_HOSTNAME@@"
+      KC_HOSTNAME_STRICT: "true"
+      KC_HTTP_ENABLED: "true"
+      # Loopback only: nginx terminates TLS and the keepalived check is local.
+      # Host networking would otherwise expose plain HTTP that trusts
+      # X-Forwarded-* on every interface (H-F3).
+      KC_HTTP_HOST: "127.0.0.1"
+      KC_HTTP_PORT: "8080"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_LOG_LEVEL: info
+      # Authentication sessions live in this cache, not the database.
+      KC_CACHE: ispn
+      KC_CACHE_CONFIG_FILE: cache-ispn.xml
+      JAVA_OPTS_APPEND: "-Djgroups.bind.address=@@OVERLAY_ADDR@@"
+    volumes:
+      - @@HA_DIR@@/cache-ispn.xml:/opt/keycloak/conf/cache-ispn.xml:ro

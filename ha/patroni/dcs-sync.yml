@@ -1,0 +1,14 @@
+# Patroni DCS patch for the IdP HA cluster (decision D-H2). REVIEWED FILE: this
+# is the whole change; bin/patroni-sync.sh applies exactly these keys and no
+# others, and reads them back.
+#
+# synchronous_mode true      one sync standby: RPO 0 for loss of a single node,
+#                            about 1 ms extra commit latency on this network.
+# synchronous_mode_strict    stays false: with both replicas down, writes
+#   false                    degrade to asynchronous rather than stopping every
+#                            login and credential change. A strict cluster
+#                            turns a two-node loss into a total IdP outage.
+# synchronous_node_count 1   exactly one synchronous standby.
+synchronous_mode: true
+synchronous_mode_strict: false
+synchronous_node_count: 1

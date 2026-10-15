@@ -87,4 +87,10 @@ echo "  unattended-upgrades: $(systemctl is-active unattended-upgrades)"
 echo "  jails:               $(fail2ban-client status 2>/dev/null | awk -F: '/Jail list/{print $2}' | xargs)"
 echo "  os:                  $(. /etc/os-release && echo "$PRETTY_NAME")"
 echo "  cloud-init:          $(cloud-init status 2>/dev/null | awk "{print \$2}") (marker $([ -f /etc/cloud/cloud-init.disabled ] && echo present || echo absent))"
+if [ "${HA_PROFILE:-0}" = "1" ]; then
+	# The IdP HA layer is a separate, dry-run-by-default script with its own
+	# private values (bin/harden-ha.sh). It is NEVER applied implicitly here:
+	# firewalling needs a dead-man timer and a fresh-login check.
+	echo "== HA profile: next, review 'bin/harden-ha.sh plan' (ufw, boot ordering, upgrade policy) =="
+fi
 echo "DONE"
