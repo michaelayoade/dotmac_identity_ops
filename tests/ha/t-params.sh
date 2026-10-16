@@ -148,6 +148,24 @@ PATH="$CS:$PATH" IDPHA_STATE_DIR="$R/state" IDPHA_PARAMS="$T/pc.json" runit "$RE
 expect "a timer-run job (collector) applies without a digest" 0 "$RC"
 export IDPHA_ALLOW_UNBOUND_APPLY=1
 
+section "the unbound-apply escapes are test-only"
+n1() { # n1 <env assignments...>: idpha_begin as --apply WITHOUT the test prefix
+	OUT="$T/n1.$RANDOM"
+	env -u IDPHA_ROOT "$@" bash -c ". '$REPO_ROOT/bin/lib-idpha.sh'; APPLY=1; IDPHA_PARAMS='$V'; idpha_begin harden-ha" >"$OUT" 2>&1
+	RC=$?
+}
+n1 IDPHA_ALLOW_UNBOUND_APPLY=1
+expect "IDPHA_ALLOW_UNBOUND_APPLY=1 without the test prefix is refused" 1 "$RC"
+has "...demanding the digest" "$OUT" "--expect-digest"
+n1 IDPHA_CHILD=1
+expect "IDPHA_CHILD=1 together with --apply is refused" 1 "$RC"
+has "...as internal" "$OUT" "IDPHA_CHILD is internal"
+n1 IDPHA_CHILD=1 IDPHA_ROOT="$T" IDPHA_ALLOW_UNBOUND_APPLY=1
+expect "IDPHA_CHILD=1 is refused even with the test prefix" 1 "$RC"
+OUT="$T/n1b"
+env IDPHA_ROOT="$T" IDPHA_ALLOW_UNBOUND_APPLY=1 bash -c ". '$REPO_ROOT/bin/lib-idpha.sh'; APPLY=1; IDPHA_PARAMS='$V'; idpha_begin harden-ha" >"$OUT" 2>&1
+expect "the escape still works WITH the test prefix (tests only)" 0 $?
+
 section "the params must describe THIS host"
 mkvalues "$T/p4.json" '.node.overlay_addr="192.0.2.99"'
 IDPHA_PARAMS="$T/p4.json" runit "$H" preview
@@ -188,7 +206,18 @@ has "upgrades the excluded cluster packages by default" "$OUT" "apt-get install 
 hasnt "never reboots without --allow-reboot" "$OUT" "systemctl reboot"
 PATH="$LS:$PATH" STUB_PRIMARY=0 IDPHA_ROOT="$R" runit "$RM"
 expect "on the leader it refuses to upgrade cluster packages" 1 "$RC"
-has "...after planning a switchover to the sync standby" "$OUT" "switchover --candidate n2"
+has "...after planning a switchover to the sync standby" "$OUT" "switchover --candidate node-2"
+RN="$T/rn"
+mkdir -p "$RN"
+cp "$LS/curl" "$RN/curl"
+printf '#!/usr/bin/env bash\ncat "%s/tests/ha/fixtures/needrestart-b-rl.txt"\n' "$REPO_ROOT" >"$RN/needrestart"
+chmod +x "$RN"/*
+PATH="$RN:$PATH" IDPHA_ROOT="$R" runit "$RM"
+expect "real needrestart output (pending kernel, no listed cluster service) plans cleanly" 0 "$RC"
+has "...and says the reboot is needed and needs the flag" "$OUT" "re-run with --allow-reboot"
+hasnt "...services outside the allowlist are never restarted" "$OUT" "systemctl restart dbus"
+PATH="$RN:$PATH" IDPHA_ROOT="$R" runit "$RM" --allow-reboot
+has "with --allow-reboot the reboot is planned" "$OUT" "systemctl reboot"
 PATH="$LS:$PATH" ETCD_MODE=degraded IDPHA_ROOT="$R" runit "$RM"
 expect "maintenance refuses a degraded cluster" 1 "$RC"
 

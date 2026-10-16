@@ -48,11 +48,17 @@ operation's parameters), never hand-authored as files on a host.
 - The params must describe the host: the node's overlay address has to be on
   the WireGuard interface, and the ufw peers have to equal `wg show endpoints`.
 - Timer-run jobs (backup, collector) and read-only checks (`host-check`,
-  `verify-ha`) cannot carry a per-run approval and do not take a digest. The
-  weekly maintenance unit sets `IDPHA_ALLOW_UNBOUND_APPLY=1`: enabling that timer
-  is the operator's standing approval for that one class of action.
-- Not implemented yet: plan expiry and a host-wide lock around apply. A Starter
-  governed operation should add both when it wraps these scripts.
+  `verify-ha`) cannot carry a per-run approval and do not take a digest.
+- There is no way around the digest on a real host: `IDPHA_ALLOW_UNBOUND_APPLY`
+  is honoured only together with the test prefix `IDPHA_ROOT`, and `IDPHA_CHILD`
+  (the internal re-plan marker) is refused together with `--apply`.
+- **Required before `idpha-maint.timer` is enabled, or any automated apply:** plan
+  expiry and a host-wide lock around apply. Neither exists yet; a Starter governed
+  operation should add both when it wraps these scripts. Until then the timer is
+  installed disabled and an unattended run would be refused for lack of a digest.
+- The first rolling maintenance of a node with a pending kernel needs
+  `--allow-reboot` (needrestart reports it as `NEEDRESTART-KSTA` 2 or 3, which the
+  script treats as "reboot required"). At the time of writing ha-1 has one pending.
 
 ## Properties and the code that enforces them
 
@@ -100,10 +106,18 @@ weekly maintenance and the overdue-update alert.
   client mode (`verify.sh` requests a short-lived token over stdin and hands only
   the token to `kcadm`). The password mode used on the retiring single host still
   passes `--password` to `kcadm` inside the container; that predates this work.
-- The S3 client (`mc`) has no verifiable public download any more (the vendor's
-  site answers 410). `ha/tools.pin` is empty on purpose and `backup-tools` refuses
-  until an artefact the operator has verified is pinned.
-- etcd test fixtures are shaped from the 3.4 documentation, not captured from a node.
+- The default backup uploader is `rclone`, installed by apt at the exact Ubuntu
+  build pinned in `ha/tools.pin` (archive-signed). Its settings and credentials
+  reach it only as `RCLONE_CONFIG_<REMOTE>_*` variables from the root-600 file
+  named by `backup_env_file`, never on a command line, with
+  `--s3-no-check-bucket --s3-no-head` so no listing or HEAD is attempted.
+  **H3.2's attack test must prove that this exact `rclone copyto` works against the
+  write-only, object-locked bucket** (put succeeds; list, get, delete refused).
+- `mc` stays as a fallback uploader (`backup_uploader: mc`) from an operator-copied
+  binary whose size and sha256 are verified against `ha/tools.pin` before install.
+  **Residual:** `mc` is unmaintained upstream (archived, no security updates).
+- Test fixtures for etcd, Patroni, needrestart and `wg` are real captures from the
+  nodes, masked to documentation values (`tests/ha/fixtures/README.md`).
 
 ## What is not covered
 

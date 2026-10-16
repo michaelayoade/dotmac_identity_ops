@@ -6,6 +6,9 @@ set -uo pipefail
 # shellcheck source=bin/lib-idpha.sh
 . "$REPO_ROOT/bin/lib-idpha.sh"
 
+mkdir -p "$T/proot"
+export IDPHA_ROOT="$T/proot" # test prefix: the unbound-apply escape is honoured only with it
+
 section "patroni-sync"
 PSTUB="$T/pstub"
 mkdir -p "$PSTUB"
@@ -90,6 +93,10 @@ case "\${STUB_AGE:-ok}" in
 	*) printf 'age-encryption.org/v1\n'; head -c 12000 /dev/zero ;;
 esac
 STUBEOF
+cat >"$BSTUB/rclone" <<STUBEOF
+#!/usr/bin/env bash
+echo "rclone \$*" >>"$CALLS"
+STUBEOF
 cat >"$BSTUB/mc" <<STUBEOF
 #!/usr/bin/env bash
 echo "mc \$*" >>"$CALLS"
@@ -104,33 +111,45 @@ PATH="$BSTUB:$PATH" STUB_LEADER=0 IDPHA_PARAMS="$V" runit "$B" --apply
 expect "replica exits 0" 0 "$RC"
 has "replica logs the skip" "$OUT" "not leader, skip"
 hasnt "replica never dumps" "$CALLS" "runuser"
-hasnt "replica never uploads" "$CALLS" "mc "
+hasnt "replica never uploads" "$CALLS" "rclone "
 : >"$CALLS"
 PATH="$BSTUB:$PATH" IDPHA_PARAMS="$V" runit "$B"
 expect "leader dry-run exits 0" 0 "$RC"
 hasnt "dry-run does not dump" "$CALLS" "runuser"
-hasnt "dry-run does not upload" "$CALLS" "mc "
+hasnt "dry-run does not upload" "$CALLS" "rclone "
 : >"$CALLS"
 PATH="$BSTUB:$PATH" IDPHA_PARAMS="$V" runit "$B" --apply
 expect "leader apply exits 0" 0 "$RC"
 has "dump runs as the postgres user with the configured flags" "$CALLS" "runuser -u postgres -- pg_dump --no-owner --clean --if-exists keycloak"
 has "encrypts to the recipient file" "$CALLS" "age -R $T/recipient.age"
-has "uploads under the write-only prefix" "$CALLS" "store/example-bucket/ha/keycloak-node-1-"
-has "mc uses a config dir in the state directory" "$CALLS" "mc --config-dir $R/state/mc cp"
+has "rclone uploads with no config file and no listing or HEAD" "$CALLS" "rclone copyto --config /dev/null --s3-no-check-bucket --s3-no-head --quiet"
+has "...under the write-only prefix" "$CALLS" "store:example-bucket/ha/keycloak-node-1-"
+hasnt "no credential-looking argument on the uploader's command line" "$CALLS" "SECRET"
 has "prints the uploaded key" "$OUT" "uploaded ha/keycloak-node-1-"
 if [ -s "$R/state/backup.last" ]; then ok "success timestamp recorded for the collector"; else bad "no backup.last"; fi
 rm -f "$R/state/backup.last"
 : >"$CALLS"
 PATH="$BSTUB:$PATH" STUB_AGE=small IDPHA_PARAMS="$V" runit "$B" --apply
 expect "a truncated ciphertext is refused" 1 "$RC"
-hasnt "...and never uploaded" "$CALLS" "mc "
+hasnt "...and never uploaded" "$CALLS" "rclone "
 PATH="$BSTUB:$PATH" STUB_AGE=nohdr IDPHA_PARAMS="$V" runit "$B" --apply
 expect "output without the age header is refused" 1 "$RC"
-hasnt "...and never uploaded either" "$CALLS" "mc "
+hasnt "...and never uploaded either" "$CALLS" "rclone "
 if [ ! -e "$R/state/backup.last" ]; then ok "failure records no success timestamp"; else bad "success recorded for a failed backup"; fi
 mkvalues "$T/v-nofmt2.env" 'del(.operations["ha-backup"].pgdump_format_args)'
 PATH="$BSTUB:$PATH" IDPHA_PARAMS="$T/v-nofmt2.env" runit "$B" --apply
 expect "backup refuses without an explicit dump format (no silent default)" 1 "$RC"
+mkvalues "$T/v-mc.json" '.operations["ha-backup"].backup_uploader="mc"' '.operations["ha-backup"].backup_mc_alias="kc"'
+: >"$CALLS"
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$T/v-mc.json" runit "$B" --apply
+expect "the mc fallback uploader still works when selected" 0 "$RC"
+has "...with its own config dir" "$CALLS" "mc --config-dir $R/state/mc cp --quiet"
+mkvalues "$T/v-badup.json" '.operations["ha-backup"].backup_uploader="s3cmd"'
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$T/v-badup.json" runit "$B" --apply
+expect "an unknown uploader is refused" 1 "$RC"
+mkvalues "$T/v-noremote.json" 'del(.operations["ha-backup"].backup_remote)'
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$T/v-noremote.json" runit "$B" --apply
+expect "rclone mode without a remote name is refused" 1 "$RC"
 unset IDPHA_STATE_DIR
 
 finish "t-patroni-backup"

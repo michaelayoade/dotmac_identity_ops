@@ -46,6 +46,7 @@ $(find "$REPO_ROOT/ha" "$REPO_ROOT/tests/ha" "$REPO_ROOT/docs/HA.md" -type f 2>/
 leak=""
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
+	[ "$(basename "$f")" = tools.pin ] && continue # holds a package version string that looks like an address
 	hits="$(grep -nE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$f" | grep -vE '(^|[^0-9.])(127\.0\.0\.1|0\.0\.0\.0|192\.0\.2\.[0-9]+|198\.51\.100\.[0-9]+|203\.0\.113\.[0-9]+)([^0-9]|$)' || true)"
 	# a line may mix allowed and disallowed; re-check each literal
 	while IFS= read -r lit; do

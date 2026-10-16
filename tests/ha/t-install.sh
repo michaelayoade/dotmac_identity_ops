@@ -166,27 +166,37 @@ mkvalues "$T/v-extra.json" '.operations["ha-install"].gate_extra_allow=["198.51.
 IDPHA_PARAMS="$T/v-extra.json" IDPHA_ROOT="$R" runit "$I" gate closed --apply
 has "an operator source is admitted only when named explicitly" "$R/etc/nginx/snippets/idpha-gate.conf" "198.51.100.99/32 1;"
 
-section "backup tools: pinned, or not at all"
+section "backup tools: pinned versions or verified files only"
 newroot
-printf 'MC_URL=\nMC_SHA256=\n' >"$T/empty.pin"
 : >"$CALLS"
-TOOLS_PIN="$T/empty.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
-expect "backup-tools refuses an empty pin" 1 "$RC"
-hasnt "...and installs nothing" "$CALLS" "apt-get"
-mkdir -p "$T/dl"
-printf '#!/usr/bin/env bash\nout=""\nwhile [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\nprintf "pinned-binary" >"$out"\n' >"$T/dl/curl"
-chmod +x "$T/dl/curl"
-good="$(printf 'pinned-binary' | sha_of)"
-printf 'MC_URL=https://example.test/mc\nMC_SHA256=%s\n' "$good" >"$T/good.pin"
-printf 'MC_URL=https://example.test/mc\nMC_SHA256=%s\n' "$(printf 'x' | sha_of)" >"$T/bad.pin"
-PATH="$T/dl:$PATH" TOOLS_PIN="$T/bad.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
-expect "a download that does not match the pin is refused" 1 "$RC"
-if [ ! -e "$R/usr/local/bin/mc" ]; then ok "...and not installed"; else bad "mismatching binary installed"; fi
-PATH="$T/dl:$PATH" TOOLS_PIN="$T/good.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
-expect "a download matching the pin installs" 0 "$RC"
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
+expect "backup-tools (default) exits 0" 0 "$RC"
+rcv="$(sed -n 's/^RCLONE_APT_VERSION=//p' "$REPO_ROOT/ha/tools.pin")"
+has "installs age and rclone at the EXACT pinned apt version" "$CALLS" "apt-get install -y age rclone=$rcv"
+has "...which is the reviewed 1.60.1 Ubuntu build" "$REPO_ROOT/ha/tools.pin" "RCLONE_APT_VERSION=1.60.1+dfsg-3ubuntu0.24"
+printf 'RCLONE_APT_VERSION=latest; rm\n' >"$T/bad-rc.pin"
+TOOLS_PIN="$T/bad-rc.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
+expect "a malformed rclone pin is refused" 1 "$RC"
+printf 'binary-bytes-for-test' >"$T/mc-src"
+good="$(sha_of <"$T/mc-src")"
+printf 'MC_SHA256=%s\nMC_BYTES=21\n' "$good" >"$T/good.pin"
+printf 'MC_SHA256=%s\nMC_BYTES=21\n' "$(printf 'x' | sha_of)" >"$T/badsha.pin"
+printf 'MC_SHA256=%s\nMC_BYTES=99\n' "$good" >"$T/badsize.pin"
+mkvalues "$T/v-mc.json" ".operations[\"ha-install\"].mc_source_file=\"$T/mc-src\""
+: >"$CALLS"
+TOOLS_PIN="$T/badsha.pin" IDPHA_PARAMS="$T/v-mc.json" IDPHA_ROOT="$R" runit "$I" backup-tools mc --apply
+expect "mc: a file that does not match the pinned sha256 is refused" 1 "$RC"
+TOOLS_PIN="$T/badsize.pin" IDPHA_PARAMS="$T/v-mc.json" IDPHA_ROOT="$R" runit "$I" backup-tools mc --apply
+expect "mc: a file of the wrong size is refused" 1 "$RC"
+if [ ! -e "$R/usr/local/bin/mc" ]; then ok "...and nothing was installed"; else bad "mismatching mc installed"; fi
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools mc --apply
+expect "mc: no source file parameter is refused" 1 "$RC"
+TOOLS_PIN="$T/good.pin" IDPHA_PARAMS="$T/v-mc.json" IDPHA_ROOT="$R" runit "$I" backup-tools mc --apply
+expect "mc: a verified file installs" 0 "$RC"
 if [ -x "$R/usr/local/bin/mc" ]; then ok "...executable"; else bad "mc not installed"; fi
-has "age comes from the distribution" "$CALLS" "apt-get install -y age"
-has "the repository ships the pin file, empty until a verified artefact is chosen" "$REPO_ROOT/ha/tools.pin" "MC_SHA256="
+has "...and the residual is stated" "$OUT" "UNMAINTAINED"
+has "the repository pins the verified mc artefact" "$REPO_ROOT/ha/tools.pin" "MC_SHA256=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891"
+has "...and its size" "$REPO_ROOT/ha/tools.pin" "MC_BYTES=30535864"
 
 section "weekly maintenance timer"
 newroot

@@ -28,7 +28,7 @@
     },
     "patroni-sync": {},
     "ha-backup": {
-      "backup_mc_alias": "store",
+      "backup_remote": "store",
       "backup_bucket": "example-bucket",
       "backup_prefix": "ha",
       "backup_age_recipient_file": "/srv/example/recipient.age",

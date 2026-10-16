@@ -14,6 +14,7 @@
 # All addresses are RFC 5737 documentation ranges.
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+export REPO_ROOT
 T="$(mktemp -d)"
 trap 'rm -rf "$T"' EXIT
 pass=0
@@ -56,14 +57,15 @@ cat >"$STUB/ip" <<'STUBEOF'
 #!/usr/bin/env bash
 echo "3: wg0    inet 192.0.2.1/24 scope global wg0"
 STUBEOF
-cat >"$STUB/wg" <<'STUBEOF'
-#!/usr/bin/env bash
-now="$(date +%s)"
-case "$*" in
-	*endpoints*) printf 'KEYA\t198.51.100.2:51820\nKEYB\t198.51.100.3:51820\n' ;;
-	*latest-handshakes*) printf 'KEYA\t%s\nKEYB\t%s\n' "$((now - 30))" "$((now - 70))" ;;
-esac
-STUBEOF
+{
+	echo '#!/usr/bin/env bash'
+	echo "WGFIX='$FIX/wg-endpoints.txt'"
+	echo 'now="$(date +%s)"'
+	echo 'case "$*" in'
+	echo '	*endpoints*) cat "$WGFIX" ;;'
+	echo '	*latest-handshakes*) printf "KEYA\t%s\nKEYB\t%s\n" "$((now - 30))" "$((now - 70))" ;;'
+	echo 'esac'
+} >"$STUB/wg"
 # etcdctl 3.4.30: "-w tsv" is rejected, JSON is replayed from the fixtures.
 {
 	echo '#!/usr/bin/env bash'
@@ -72,11 +74,11 @@ STUBEOF
 	echo 'mode="${ETCD_MODE:-ok}"'
 	echo '[ "$mode" = missing ] && exit 127'
 	echo 'case "$*" in'
-	echo '  *"endpoint health"*) if [ "$mode" = degraded ]; then sed "s/\"health\":true/\"health\":false/" "$FIXDIR/etcd-3.4-endpoint-health.json" | sed "s/false/true/2g"; else cat "$FIXDIR/etcd-3.4-endpoint-health.json"; fi ;;'
-	echo '  *"endpoint status"*) if [ "$mode" = noleader ]; then sed "s/\"leader\":[0-9]*/\"leader\":1/g" "$FIXDIR/etcd-3.4-endpoint-status.json"; else cat "$FIXDIR/etcd-3.4-endpoint-status.json"; fi ;;'
+	echo '  *"endpoint health"*) if [ "$mode" = degraded ]; then sed "s/\"health\":true/\"health\":false/" "$FIXDIR/etcd-3.4.30-endpoint-health.json" | sed "s/false/true/2g"; else cat "$FIXDIR/etcd-3.4.30-endpoint-health.json"; fi ;;'
+	echo '  *"endpoint status"*) if [ "$mode" = noleader ]; then sed "s/\"leader\":[0-9]*/\"leader\":1/g" "$FIXDIR/etcd-3.4.30-endpoint-status.json"; else cat "$FIXDIR/etcd-3.4.30-endpoint-status.json"; fi ;;'
 	echo 'esac'
 } >"$STUB/etcdctl"
-printf 'Cluster\tMember\tHost\tRole\tState\tTL\tLag in MB\nc\tn1\th\tLeader\trunning\t5\t\nc\tn2\th\tSync Standby\tstreaming\t5\t0\nc\tn3\th\tReplica\tstreaming\t5\t0\n' >"$T/default-patroni.list"
+cp "$FIX/patronictl-3.2.2-list.tsv" "$T/default-patroni.list"
 {
 	echo '#!/usr/bin/env bash'
 	echo "echo \"patronictl \$*\" >>\"$CALLS\""
@@ -135,7 +137,7 @@ mkvalues() {
     },
     "patroni-sync": {},
     "ha-backup": {
-      "backup_mc_alias": "store",
+      "backup_remote": "store",
       "backup_bucket": "example-bucket",
       "backup_prefix": "ha",
       "backup_age_recipient_file": "$T/recipient.age",

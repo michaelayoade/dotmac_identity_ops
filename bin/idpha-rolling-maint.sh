@@ -62,7 +62,12 @@ note "-- 1. preflight"
 if health; then okline "cluster healthy"; else die "preflight failed: not touching a node while the cluster is degraded"; fi
 
 note "-- 2. services needrestart lists"
-pending="$(needrestart -b -r l 2>/dev/null | sed -n 's/^NEEDRESTART-SVC: //p' | sed 's/\.service$//' || true)"
+nr_out="$(needrestart -b -r l 2>/dev/null || true)"
+pending="$(printf '%s\n' "$nr_out" | sed -n 's/^NEEDRESTART-SVC: //p' | sed 's/\.service$//' || true)"
+# NEEDRESTART-KSTA: 2 = ABI-compatible kernel update waiting, 3 = new kernel version waiting.
+# A new kernel needs a reboot even when /var/run/reboot-required is absent.
+kernel_pending=0
+case "$(printf '%s\n' "$nr_out" | sed -n 's/^NEEDRESTART-KSTA: //p')" in 2 | 3) kernel_pending=1 ;; esac
 todo=""
 for svc in $pending; do
 	case " $RESTART_ALLOWLIST " in
@@ -72,7 +77,7 @@ for svc in $pending; do
 done
 note "      to restart:${todo:- none}"
 
-if [ -n "$todo" ] || { [ -f "$(hostpath /var/run/reboot-required)" ] && [ "$ALLOW_REBOOT" = 1 ]; }; then
+if [ -n "$todo" ] || { { [ -f "$(hostpath /var/run/reboot-required)" ] || [ "$kernel_pending" = 1 ]; } && [ "$ALLOW_REBOOT" = 1 ]; }; then
 	note "-- 3. leader check"
 	if curl -sf --max-time 3 -o /dev/null "http://${OVERLAY_ADDR}:${PATRONI_PORT:-8008}/primary"; then
 		cand="$("$PATRONICTL" -c "$PATRONI_CONF" list -f tsv 2>/dev/null | awk -F'\t' 'NR==1{for(i=1;i<=NF;i++){if($i=="Role")r=i;if($i=="Member")m=i}next} $r ~ /Sync Standby/ {print $m; exit} $r ~ /Replica/ && c=="" {c=$m} END{if(!found && c!="") print c}' | head -1)"
@@ -101,12 +106,12 @@ for svc in $todo; do
 done
 
 note "-- 5. reboot"
-if [ -f "$(hostpath /var/run/reboot-required)" ]; then
+if [ -f "$(hostpath /var/run/reboot-required)" ] || [ "$kernel_pending" = 1 ]; then
 	if [ "$ALLOW_REBOOT" = 1 ]; then
 		run systemctl reboot
 		note "after the node returns, run this script again (preflight only) before touching the next node"
 	else
-		note "      reboot required; re-run with --allow-reboot when ready"
+		note "      reboot required (pending kernel); re-run with --allow-reboot when ready: the first maintenance on a node with a pending kernel needs it"
 	fi
 else
 	okline "no reboot required"

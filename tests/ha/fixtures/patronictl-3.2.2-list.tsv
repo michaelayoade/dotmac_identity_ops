@@ -1,0 +1,4 @@
+Cluster	Member	Host	Role	State	TL	Lag in MB
+example-cluster	node-1	192.0.2.1	Leader	running	21	
+example-cluster	node-2	192.0.2.2	Replica	streaming	21	0
+example-cluster	node-3	192.0.2.3	Replica	streaming	21	0

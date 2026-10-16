@@ -8,7 +8,7 @@
 #   ha-install.sh nginx              http pieces + vhosts, `nginx -t`, reload
 #   ha-install.sh gate closed|open   swap the vhost allowlist (open = H7 T0 ONLY)
 #   ha-install.sh metrics-token      install the bearer map from the token file
-#   ha-install.sh backup-tools       age from apt + the sha256-pinned S3 client (ha/tools.pin)
+#   ha-install.sh backup-tools [rclone|mc]   age + rclone from apt at the pinned version; "mc" = unmaintained fallback from a verified file
 #   ha-install.sh scripts            copy the node-side scripts to $HA_DIR/bin
 #   ha-install.sh units backup|collector|maint     install systemd units (timer NOT enabled)
 #   ha-install.sh timer-enable backup|collector|maint   enable --now the timer (H3.5 / H4.1)
@@ -234,29 +234,32 @@ unit_names() {
 	esac
 }
 
-# backup-tools: age from the distribution, the S3 client from the PINNED
-# artefact only (ha/tools.pin). Refuses while the pin is empty or on any hash mismatch.
+# backup-tools: age and the default uploader (rclone) from the distribution at
+# EXACT pinned versions; "backup-tools mc" instead installs the unmaintained mc
+# fallback from an operator-supplied file after size and sha256 verification.
 do_backup_tools() {
-	local pin="${TOOLS_PIN:-$REPO_ROOT/ha/tools.pin}" url sum tmp
-	url="$(sed -n 's/^MC_URL=//p' "$pin")"
-	sum="$(sed -n 's/^MC_SHA256=//p' "$pin")"
-	[ -n "$url" ] && [ -n "$sum" ] || die "ha/tools.pin has no pinned S3 client (MC_URL / MC_SHA256 empty): an unpinned download is never acceptable"
-	[[ "$url" =~ ^https://[A-Za-z0-9./_-]+$ ]] || die "MC_URL must be a plain https URL"
-	[[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die "MC_SHA256 must be 64 lowercase hex characters"
-	run apt-get install -y age
-	if is_apply; then
-		tmp="$(mktemp)"
-		curl -fsSL --proto '=https' --max-time 120 -o "$tmp" "$url" || die "download of the pinned S3 client failed"
-		[ "$(sha_of <"$tmp")" = "$sum" ] || {
-			rm -f "$tmp"
-			die "downloaded S3 client does not match the pinned sha256: NOT installed"
-		}
-		put_file /usr/local/bin/mc 755 <"$tmp"
-		rm -f "$tmp"
-	else
-		planline "download the pinned S3 client (sha256 ${sum:0:12}...) and install it to /usr/local/bin/mc"
-		effect "$(_tab download "$url sha256:$sum")"
-	fi
+	local pin="${TOOLS_PIN:-$REPO_ROOT/ha/tools.pin}" which="${1:-rclone}" ver sum bytes src
+	case "$which" in
+		rclone)
+			ver="$(sed -n 's/^RCLONE_APT_VERSION=//p' "$pin")"
+			[[ "$ver" =~ ^[0-9][A-Za-z0-9.+~:-]*$ ]] || die "ha/tools.pin has no valid RCLONE_APT_VERSION"
+			run apt-get install -y age "rclone=$ver"
+			;;
+		mc)
+			sum="$(sed -n 's/^MC_SHA256=//p' "$pin")"
+			bytes="$(sed -n 's/^MC_BYTES=//p' "$pin")"
+			[[ "$sum" =~ ^[0-9a-f]{64}$ ]] && [[ "$bytes" =~ ^[0-9]+$ ]] || die "ha/tools.pin has no valid MC_SHA256 / MC_BYTES"
+			require MC_SOURCE_FILE
+			src="$MC_SOURCE_FILE"
+			note "mc is UNMAINTAINED upstream (recorded residual); rclone is the default uploader"
+			[ -f "$src" ] || die "mc_source_file does not exist: the operator must copy the binary to the node first"
+			[ "$(wc -c <"$src" | tr -d ' ')" = "$bytes" ] || die "mc_source_file is not the pinned size ($bytes bytes): NOT installed"
+			[ "$(sha_of <"$src")" = "$sum" ] || die "mc_source_file does not match the pinned sha256: NOT installed"
+			run apt-get install -y age
+			put_file /usr/local/bin/mc 755 <"$src"
+			;;
+		*) die "backup-tools takes 'rclone' (default) or 'mc'" ;;
+	esac
 }
 
 do_units() {
@@ -286,7 +289,7 @@ do_timer_enable() {
 }
 
 case "$cmd" in
-	backup-tools) do_backup_tools ;;
+	backup-tools) do_backup_tools "${1:-}" ;;
 	scripts) do_scripts ;;
 	units) do_units "${1:-}" ;;
 	timer-enable) do_timer_enable "${1:-}" ;;

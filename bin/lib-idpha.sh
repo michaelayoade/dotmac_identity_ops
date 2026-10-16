@@ -273,13 +273,20 @@ idpha_begin() {
 	PRIMARY_NIC="${PRIMARY_NIC:-eth0}"
 	if [ "$PLAN_JSON" = 1 ]; then exec 4>&1 1>&2; fi
 	[ "$kind" = runtime ] || host_identity_check
-	if is_apply && [ "$kind" != runtime ] && [ -z "${IDPHA_CHILD:-}" ]; then
+	# IDPHA_CHILD marks the internal re-plan, which always runs as --plan. It is
+	# never valid together with --apply: it would be a way around the digest.
+	if is_apply && [ -n "${IDPHA_CHILD:-}" ]; then
+		die "IDPHA_CHILD is internal to the re-plan and is refused together with --apply"
+	fi
+	if is_apply && [ "$kind" != runtime ]; then
 		if [ -n "$IDPHA_EXPECT_DIGEST" ]; then
 			local got
 			got="$(IDPHA_CHILD=1 IDPHA_PARAMS="$IDPHA_PARAMS" bash "$0" ${CHILD_ARGS[@]+"${CHILD_ARGS[@]}"} --plan 2>/dev/null | python3 -I "$tool" digest-of)" || die "re-plan before apply failed"
 			[ "$got" = "$IDPHA_EXPECT_DIGEST" ] || die "plan digest differs from the approved one (approved $IDPHA_EXPECT_DIGEST, now $got): re-plan and re-approve"
 			okline "re-plan matches the approved digest"
-		elif [ "${IDPHA_ALLOW_UNBOUND_APPLY:-0}" != 1 ]; then
+		elif [ "${IDPHA_ALLOW_UNBOUND_APPLY:-0}" != 1 ] || [ -z "${IDPHA_ROOT:-}" ]; then
+			# The unbound escape exists for the offline tests only: it is honoured
+			# solely together with the test prefix IDPHA_ROOT, never on a real host.
 			die "--apply needs --expect-digest <digest printed by --plan>: an approval binds the previewed effect"
 		fi
 	fi

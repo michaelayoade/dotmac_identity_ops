@@ -12,7 +12,7 @@ mkdir -p "$CSTUB"
 cat >"$CSTUB/curl" <<'STUBEOF'
 #!/usr/bin/env bash
 case "$*" in
-	*"/cluster"*) printf '{"members":[{"name":"node-1","role":"leader","state":"running","timeline":7},{"name":"node-2","role":"sync_standby","state":"streaming","timeline":7,"lag":0}]}' ;;
+	*"/cluster"*) cat "$REPO_ROOT/tests/ha/fixtures/patroni-3.2.2-cluster.json" ;;
 	*"/health/ready"*) [ "${STUB_KC:-1}" = 1 ] && exit 0 || exit 22 ;;
 esac
 exit 0
@@ -38,7 +38,7 @@ CVP="$T/cvp.json"
 PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state" IDPHA_PARAMS="$CV" runit "$C"
 expect "collector prints and exits 0" 0 "$RC"
 has "leader detected" "$OUT" 'idpha_patroni_is_leader{node="node-1"} 1'
-has "timeline read" "$OUT" 'idpha_patroni_timeline{node="node-1"} 7'
+has "timeline read" "$OUT" 'idpha_patroni_timeline{node="node-1"} 21'
 has "etcd healthy members" "$OUT" 'idpha_etcd_members_healthy{node="node-1"} 3'
 has "etcd has one leader" "$OUT" 'idpha_etcd_has_leader{node="node-1"} 1'
 has "keepalived active" "$OUT" 'idpha_keepalived_active{node="node-1"} 1'
