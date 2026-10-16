@@ -6,7 +6,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rc=0
 total_pass=0
 total_fail=0
-for t in t-static t-harden t-install t-patroni-backup t-collect-hostcheck; do
+for t in t-static t-params t-harden t-install t-patroni-backup t-collect-hostcheck; do
 	echo "######## $t"
 	out="$(bash "$HERE/$t.sh" 2>&1)" || rc=1
 	printf '%s\n' "$out"

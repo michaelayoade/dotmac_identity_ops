@@ -21,6 +21,7 @@
       "links_cert_dir": "/srv/example/tls/links",
       "links_root": "/srv/example/links",
       "gate_allow": ["198.51.100.77/32"],
+      "legacy_vhost_files": ["/srv/example/nginx/sites-enabled/idp.conf", "/srv/example/nginx/sites-enabled/links.conf"],
       "metrics_allow": ["198.51.100.79/32"],
       "metrics_token_file": "/srv/example/metrics.token",
       "backup_env_file": "/srv/example/backup.env"
@@ -31,7 +32,7 @@
       "backup_bucket": "example-bucket",
       "backup_prefix": "ha",
       "backup_age_recipient_file": "/srv/example/recipient.age",
-      "pgdump_format_args": "--no-owner --no-acl"
+      "pgdump_format_args": "--no-owner --clean --if-exists"
     },
     "collector": {"idpha_prom_file": "/srv/example/node-exporter/idpha.prom"},
     "host-check": {},

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "dotmac-idp-ha-params-v1",
   "title": "IdP HA node parameters",
-  "description": "The ONE typed document every ha operation consumes. Composed and entered at ship time (governed-operation parameters); never committed with real values. It carries no secret: credentials are named by REFERENCE only (a root-600 file on the host, resolved on the host). Topology fields have no defaults. Each operation has its own section under 'operations'; a script requires its own section (an explicit empty object where it has no required values) and ignores the others.",
+  "description": "The ONE typed document every ha operation consumes. Composed and entered at ship time (governed-operation parameters); never committed with real values. It holds nothing confidential; credentials are named by REFERENCE only (a root-600 file on the host, resolved on the host). Topology fields have no defaults. Each operation has its own section under 'operations'; a script requires its own section (an explicit empty object where it has no required values) and ignores the others.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "node", "operations"],
@@ -68,6 +68,7 @@
       "type": "object", "additionalProperties": false, "required": ["apt_upgrade_time"],
       "properties": {
         "apt_upgrade_time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"},
+        "exclude_cluster_packages": {"description": "Default TRUE (approved widening, patch latency): exclude patroni, etcd-server, haproxy, keepalived from unattended upgrades so their maintainer scripts cannot restart the leader; rolling-maint upgrades them per node instead.", "type": "boolean"},
         "deadman_minutes": {"type": "integer", "minimum": 1, "maximum": 60}
       }
     },
@@ -80,8 +81,10 @@
         "idp_cert_dir": {"type": "string", "format": "abs-path"},
         "links_cert_dir": {"type": "string", "format": "abs-path"},
         "links_root": {"type": "string", "format": "abs-path"},
-        "gate_allow": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "cidr4"}},
-        "metrics_allow": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "cidr4"}},
+        "gate_allow": {"description": "Monitoring-host sources that may reach the IdP while the vhost is CLOSED. Single hosts only (/32 or /128); loopback is always added by the installer.", "type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "hostcidr"}},
+        "gate_extra_allow": {"description": "EXPLICIT widening: operator sources admitted while closed. Prefer an ssh tunnel to loopback; a shared-NAT source admits everyone behind it.", "type": "array", "uniqueItems": true, "items": {"type": "string", "format": "hostcidr"}},
+        "metrics_allow": {"description": "Monitoring host only. Single hosts (/32 or /128).", "type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "hostcidr"}},
+        "legacy_vhost_files": {"description": "Pre-existing enabled vhost links/files for the same names; the installer disables them in the same run (backed up, restored on rollback)", "type": "array", "uniqueItems": true, "items": {"type": "string", "format": "abs-path"}},
         "metrics_token_file": {"description": "REFERENCE: root-600 file on the host holding the bearer value", "type": "string", "format": "abs-path"},
         "backup_env_file": {"description": "REFERENCE: root-600 file on the host carrying the write-only store identity", "type": "string", "format": "abs-path"}
       }
@@ -102,7 +105,7 @@
         "kc_db_name": {"type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$"},
         "pg_dump_user": {"type": "string", "pattern": "^[a-z_][a-z0-9_]{0,31}$"},
         "patroni_port": {"type": "integer", "minimum": 1, "maximum": 65535},
-        "min_ciphertext_bytes": {"type": "integer", "minimum": 64},
+        "min_ciphertext_bytes": {"type": "integer", "minimum": 10240},
         "idpha_state_dir": {"type": "string", "format": "abs-path"}
       }
     },
@@ -134,6 +137,8 @@
     "rollingMaint": {
       "type": "object", "additionalProperties": false,
       "properties": {
+        "upgrade_cluster_packages": {"description": "Default TRUE. After switching over, upgrade patroni, etcd-server, haproxy, keepalived on this node (pairs with harden-ha exclude_cluster_packages).", "type": "boolean"},
+        "maint_on_calendar": {"description": "systemd OnCalendar for the weekly maintenance timer (installed DISABLED). Give each node a different day/time: one node at a time.", "type": "string", "pattern": "^[A-Za-z0-9 :*,./-]{3,64}$"},
         "restart_allowlist": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["patroni", "haproxy", "nginx", "keepalived", "etcd", "fail2ban"]}},
         "health_wait_s": {"type": "integer", "minimum": 5, "maximum": 1800}
       }

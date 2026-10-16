@@ -54,12 +54,14 @@ while IFS= read -r f; do
 	done < <(grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' "$f" | sort -u)
 	: "$hits"
 done <<<"$SCAN"
+v6="$(grep -noE '([0-9a-fA-F]{1,4}:){3,}[0-9a-fA-F]{0,4}|::[0-9a-fA-F]{1,4}(:[0-9a-fA-F]{1,4})+' $SCAN 2>/dev/null | grep -viE '2001:db8' || true)"
+if [ -z "$v6" ]; then ok "no IPv6 literal outside the documentation range"; else bad "IPv6 literals found: $v6"; fi
 if [ -z "$leak" ]; then ok "no IPv4 literal outside loopback and RFC 5737 ranges"; else bad "IPv4 literals found:$leak"; fi
 topo=""
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	[ "$(basename "$f")" = t-static.sh ] && continue
-	for pat in 'openbao' 'bao://' 'dotmac-''s3' 'minio' 'wasabi' 'conta''bo' '10\.10\.0\.' '/etc/dot''mac' '/opt/keycloak-''ha'; do
+	for pat in 'openbao' 'bao://' 'dotmac-''s3' 'minio' 'wasabi' 'conta''bo' '10\.10\.0\.' '/etc/dot''mac' '/opt/keycloak-''ha' 'idp-ha-[0-9]' 'vm''i[0-9]' '/etc/ssl/i''dp' '/var/www/li''nks'; do
 		if grep -qiE -- "$pat" "$f"; then topo="$topo $(basename "$f"):$pat"; fi
 	done
 done <<<"$SCAN"

@@ -42,9 +42,9 @@ server {
     ssl_session_cache shared:SSL:10m;
     ssl_session_timeout 1d;
     ssl_session_tickets off;
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    ssl_trusted_certificate @@IDP_CERT_DIR@@/chain.pem;
+    # No OCSP stapling: the certificates carry no OCSP URI (the CA ended OCSP) and
+    # there is no chain file beside them, so the stapling directives would only
+    # make nginx -t fail.
 
     add_header Strict-Transport-Security "max-age=31536000" always;
     add_header X-Content-Type-Options "nosniff" always;

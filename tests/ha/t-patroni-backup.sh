@@ -85,9 +85,9 @@ cat >"$BSTUB/age" <<STUBEOF
 echo "age \$*" >>"$CALLS"
 cat >/dev/null
 case "\${STUB_AGE:-ok}" in
-	nohdr) head -c 3000 /dev/zero ;;
+	nohdr) head -c 12000 /dev/zero ;;
 	small) printf 'age-encryption.org/v1\n' ;;
-	*) printf 'age-encryption.org/v1\n'; head -c 3000 /dev/zero ;;
+	*) printf 'age-encryption.org/v1\n'; head -c 12000 /dev/zero ;;
 esac
 STUBEOF
 cat >"$BSTUB/mc" <<STUBEOF
@@ -113,9 +113,10 @@ hasnt "dry-run does not upload" "$CALLS" "mc "
 : >"$CALLS"
 PATH="$BSTUB:$PATH" IDPHA_PARAMS="$V" runit "$B" --apply
 expect "leader apply exits 0" 0 "$RC"
-has "dump runs as the postgres user with the configured flags" "$CALLS" "runuser -u postgres -- pg_dump --no-owner --no-acl keycloak"
+has "dump runs as the postgres user with the configured flags" "$CALLS" "runuser -u postgres -- pg_dump --no-owner --clean --if-exists keycloak"
 has "encrypts to the recipient file" "$CALLS" "age -R $T/recipient.age"
 has "uploads under the write-only prefix" "$CALLS" "store/example-bucket/ha/keycloak-node-1-"
+has "mc uses a config dir in the state directory" "$CALLS" "mc --config-dir $R/state/mc cp"
 has "prints the uploaded key" "$OUT" "uploaded ha/keycloak-node-1-"
 if [ -s "$R/state/backup.last" ]; then ok "success timestamp recorded for the collector"; else bad "no backup.last"; fi
 rm -f "$R/state/backup.last"

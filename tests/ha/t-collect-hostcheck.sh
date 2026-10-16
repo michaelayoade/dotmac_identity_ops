@@ -17,13 +17,6 @@ case "$*" in
 esac
 exit 0
 STUBEOF
-cat >"$CSTUB/etcdctl" <<'STUBEOF'
-#!/usr/bin/env bash
-case "$*" in
-	*"endpoint health"*) printf 'a is healthy\nb is healthy\nc is healthy\n' ;;
-	*"endpoint status"*) printf 'a\t1\t3.4\t1\ttrue\tfalse\t2\t3\t3\t\nb\t2\t3.4\t1\tfalse\tfalse\t2\t3\t3\t\n' ;;
-esac
-STUBEOF
 cat >"$CSTUB/ip" <<'STUBEOF'
 #!/usr/bin/env bash
 echo "2: eth0    inet 203.0.113.10/32 scope global eth0"
@@ -62,10 +55,7 @@ PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state3" IDPHA_PARAMS="$CVP" runit "$C"
 if [ ! -e "$R/prom/idpha.prom" ]; then ok "dry-run writes no textfile"; else bad "dry-run wrote the textfile"; fi
 PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state3" IDPHA_PARAMS="$CVP" runit "$C" --apply
 if [ -s "$R/prom/idpha.prom" ] && [ ! -e "$R/prom/idpha.prom.tmp" ]; then ok "apply writes the textfile atomically"; else bad "textfile missing or tmp left"; fi
-NOETCD="$T/noetcd"
-mkdir -p "$NOETCD"
-for f in "$CSTUB"/*; do [ "$(basename "$f")" = etcdctl ] || cp "$f" "$NOETCD/"; done
-PATH="$NOETCD:$PATH" IDPHA_STATE_DIR="$R/state4" IDPHA_PARAMS="$CV" runit "$C"
+ETCD_MODE=missing PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state4" IDPHA_PARAMS="$CV" runit "$C"
 has "a missing etcdctl is 'could not look' (check_ok 0)" "$OUT" 'idpha_collect_check_ok{check="etcd"} 0'
 hasnt "...and not a false 'unhealthy' sample" "$OUT" 'idpha_etcd_members_healthy{'
 
@@ -90,6 +80,9 @@ To                         Action      From
 51820/udp                  ALLOW IN    198.51.100.3               # wg
 Anywhere on wg0            ALLOW IN    Anywhere                   # overlay
 22/tcp (v6)                ALLOW IN    Anywhere (v6)              # ssh
+80/tcp (v6)                ALLOW IN    Anywhere (v6)              # acme
+443/tcp (v6)               ALLOW IN    Anywhere (v6)              # https
+Anywhere (v6) on wg0       ALLOW IN    Anywhere (v6)              # overlay
 X
 STUBEOF
 cat >"$HSTUB/ss" <<'STUBEOF'
@@ -107,6 +100,13 @@ exit 0
 STUBEOF
 printf '#!/usr/bin/env bash\nprintf "passwordauthentication no\\nkbdinteractiveauthentication no\\npermitrootlogin prohibit-password\\n"\n' >"$HSTUB/sshd"
 printf '#!/usr/bin/env bash\nexit 0\n' >"$HSTUB/fail2ban-client"
+cat >"$HSTUB/nginx" <<'STUBEOF'
+#!/usr/bin/env bash
+if [ "$1" = "-T" ]; then
+	printf '    server_name idp.example.test links.example.test;\n    server_name idp.example.test;\n    server_name links.example.test;\n'
+fi
+exit 0
+STUBEOF
 printf '#!/usr/bin/env bash\nexit 0\n' >"$HSTUB/openssl"
 printf '#!/usr/bin/env bash\necho "%s"\n' "$(sed -n 's/^KC_IMAGE_REF=//p' "$REPO_ROOT/ha/image.pin")" >"$HSTUB/docker"
 cp "$CSTUB/wg" "$HSTUB/wg"
@@ -134,7 +134,7 @@ printf 'services:\n  keycloak:\n    image: %s\n    environment:\n      KC_HOSTNA
 chmod 600 "$R/srv/example/ha/compose.yml"
 HC="$REPO_ROOT/bin/host-check.sh"
 PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
-expect "a conforming node passes" 0 "$RC"
+expect "a conforming node passes" 0 "$RC"; [ "$RC" = 0 ] || grep -o "{[^}]*FAIL[^}]*}" "$OUT"
 has "JSON reports zero fails" "$OUT" '"fails":0'
 has "port 57800 is reported as contained by ufw, not passed silently" "$OUT" 'contained only by ufw'
 PATH="$HSTUB:$PATH" HC_UFW=off IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed

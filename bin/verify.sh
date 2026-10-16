@@ -103,16 +103,26 @@ dc() {
 # is itself being fed on stdin and then nests an exec that also consumes stdin
 # will silently eat its own remaining lines; stdin gets exactly one owner.
 kcadm() {
-	dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-		/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+	if [ "$KC_ADMIN_AUTH" = "client" ]; then
+		# client mode authenticates with a short-lived token (see kc_login): the
+		# long-lived client secret is never a command-line argument.
+		dc exec -T "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh "$@" --no-config --server "$KC_INTERNAL_URL" --token "$KC_BEARER_JWT" </dev/null
+	else
+		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+	fi
 }
+KC_BEARER_JWT=""
 
 kc_login() {
 	if [ "$KC_ADMIN_AUTH" = "client" ]; then
-		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-			sh -c '/opt/keycloak/bin/kcadm.sh config credentials \
-			    --server "$0" --realm "$1" --client "$2" --secret "$KCADM_PASSWORD" >/dev/null' \
-			"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
+		# Token request from the host (host networking: the loopback listener is
+		# reachable). The secret travels on curl's STDIN (printf is a builtin, so it
+		# is on no argv); only the resulting short-lived token is passed on.
+		KC_BEARER_JWT="$(printf 'grant_type=client_credentials&client_id=%s&%s=%s' "$KC_ADMIN_USER" "client_secret" "$KC_ADMIN_PASSWORD" |
+			curl -fsS --data-binary @- "$KC_INTERNAL_URL/realms/$KC_ADMIN_REALM/protocol/openid-connect/token" | jq -r '.access_token // empty')"
+		[ -n "$KC_BEARER_JWT" ]
 	else
 		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
 			sh -c '/opt/keycloak/bin/kcadm.sh config credentials \

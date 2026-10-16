@@ -8,9 +8,11 @@
 #
 # Steps (dry-run prints them, changing nothing):
 #   1. preflight: 3 healthy etcd members, Patroni healthy, WireGuard handshakes fresh
-#   2. needrestart -b -> the services that need a restart (allowlist only)
+#   2. needrestart -b -r l -> the services that need a restart (allowlist only)
 #   3. if this node is the Patroni leader: switchover to a healthy replica FIRST
 #   4. restart each listed service, health re-checked after every one
+#   3b. (param upgrade_cluster_packages, default ON) upgrade patroni, etcd-server, haproxy,
+#      keepalived here, on a node that is not the leader
 #   5. reboot only with --allow-reboot, and only if /var/run/reboot-required
 #      exists; after the reboot, run this script again (it then just checks health)
 #
@@ -26,7 +28,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-idpha.sh"
 
 PATRONICTL="${PATRONICTL:-patronictl}"
-PATRONI_CONF="${PATRONI_CONF:-/etc/patroni/config.yml}"
+PATRONI_CONF="${PATRONI_CONF:-}"
 RESTART_ALLOWLIST="${RESTART_ALLOWLIST:-patroni haproxy nginx keepalived etcd fail2ban}"
 HEALTH_WAIT_S="${HEALTH_WAIT_S:-120}"
 ALLOW_REBOOT=0
@@ -39,40 +41,11 @@ for a in ${REST_ARGS[@]+"${REST_ARGS[@]}"}; do
 done
 idpha_begin rolling-maint
 mode_banner
-require OVERLAY_ADDR
+require OVERLAY_ADDR PATRONI_CONF
 WG_IF="${WG_IF:-wg0}"
 if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "APPLY needs root"; fi
 
-health() { # 0 healthy, 1 not (prints why)
-	local healthy table verdict now stale=0 ts cnt=0
-	healthy="$(ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health --cluster 2>&1 | grep -c 'is healthy' || true)"
-	[ "$healthy" = "3" ] || {
-		echo "      etcd healthy members: $healthy (want 3)"
-		return 1
-	}
-	table="$("$PATRONICTL" -c "$PATRONI_CONF" list -f tsv 2>/dev/null)" || {
-		echo "      patronictl list failed"
-		return 1
-	}
-	verdict="$(printf '%s\n' "$table" | awk -F'\t' '
-		NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "Role") r = i; if ($i == "State") s = i } next }
-		{ n++; if ($r ~ /Leader/) l++; if ($s != "running" && $s != "streaming") b++ }
-		END { printf "%d/%d/%d", n, l, b }')"
-	[ "$verdict" = "3/1/" ] || [ "$verdict" = "3/1/0" ] || {
-		echo "      patroni members/leaders/notok = $verdict (want 3/1/0)"
-		return 1
-	}
-	now="$(date +%s)"
-	while read -r _ ts; do
-		[ -n "${ts:-}" ] || continue
-		cnt=$((cnt + 1))
-		{ [ "$ts" -gt 0 ] && [ $((now - ts)) -lt 150 ]; } || stale=$((stale + 1))
-	done < <(wg show "$WG_IF" latest-handshakes 2>/dev/null)
-	[ "$cnt" -ge 2 ] && [ "$stale" = 0 ] || {
-		echo "      wireguard: $stale stale of $cnt peers"
-		return 1
-	}
-}
+health() { cluster_health; } # the shared HC set (lib-idpha.sh)
 
 wait_healthy() {
 	local i=0
@@ -89,7 +62,7 @@ note "-- 1. preflight"
 if health; then okline "cluster healthy"; else die "preflight failed: not touching a node while the cluster is degraded"; fi
 
 note "-- 2. services needrestart lists"
-pending="$(needrestart -b 2>/dev/null | sed -n 's/^NEEDRESTART-SVC: //p' | sed 's/\.service$//' || true)"
+pending="$(needrestart -b -r l 2>/dev/null | sed -n 's/^NEEDRESTART-SVC: //p' | sed 's/\.service$//' || true)"
 todo=""
 for svc in $pending; do
 	case " $RESTART_ALLOWLIST " in
@@ -110,6 +83,15 @@ if [ -n "$todo" ] || { [ -f "$(hostpath /var/run/reboot-required)" ] && [ "$ALLO
 	else
 		okline "not the leader"
 	fi
+fi
+
+if [ "${UPGRADE_CLUSTER_PACKAGES:-1}" = 1 ]; then
+	note "-- 3b. cluster packages (this node is not the leader now)"
+	if curl -sf --max-time 3 -o /dev/null "http://${OVERLAY_ADDR}:${PATRONI_PORT:-8008}/primary"; then
+		die "refusing to upgrade cluster packages on the leader: switchover first"
+	fi
+	run apt-get install --only-upgrade -y -o Dpkg::Options::=--force-confold patroni etcd-server haproxy keepalived
+	if is_apply; then wait_healthy; okline "cluster packages current; cluster healthy"; fi
 fi
 
 note "-- 4. restarts"

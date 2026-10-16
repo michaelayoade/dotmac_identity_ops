@@ -85,6 +85,8 @@ if printf '%s' "$ufw_v" | grep -q '^Status: active'; then
 	printf '%s' "$ufw_v" | grep -q 'Default: deny (incoming), allow (outgoing), deny (routed)' && rec PASS ufw.defaults "" || rec FAIL ufw.defaults "defaults are not deny/allow/deny(routed)"
 	v4="$(printf '%s\n' "$ufw_v" | grep 'ALLOW IN' | grep -v '(v6)' || true)"
 	n="$(printf '%s' "$v4" | grep -c . || true)"
+	v6="$(printf '%s\n' "$ufw_v" | grep 'ALLOW IN' | grep -c '(v6)' || true)"
+	[ "$v6" = 4 ] && rec PASS ufw.rule_count_v6 "" || rec FAIL ufw.rule_count_v6 "expected 4 IPv6 allow rules (ssh, http, https, overlay), found $v6"
 	expect=6
 	[ "$n" = "$expect" ] && rec PASS ufw.rule_count "" || rec FAIL ufw.rule_count "expected $expect IPv4 allow rules, found $n"
 	for pat in "^${SSH_PORT:-22}/tcp " "^80/tcp " "^443/tcp " "^${WG_PORT:-51820}/udp .*${PEER_PUBLIC_1}" "^${WG_PORT:-51820}/udp .*${PEER_PUBLIC_2}" "^Anywhere on ${WG_IF} "; do
@@ -107,9 +109,12 @@ while read -r proto _ _ _ laddr _; do
 	if [[ "$addr" =~ $wild ]]; then
 		case "$proto/$port" in
 			tcp/22 | tcp/80 | tcp/443 | udp/51820 | udp/"${WG_PORT:-51820}" | tcp/"${SSH_PORT:-22}") ;;
-			tcp/57800 | tcp/9000)
+			tcp/57800)
 				if [ "$ufw_on" = 1 ]; then rec WARN "listener.$proto/$port" "wildcard bind; contained only by ufw (overlay-only rule)"; else bad="$bad $proto/$port"; fi
 				;;
+			# 26.0.8: the management interface follows KC_HTTP_HOST, so a wildcard
+			# 9000 while Keycloak runs means the loopback bind did not take effect.
+			tcp/9000) bad="$bad $proto/$port" ;;
 			*) bad="$bad $proto/$port" ;;
 		esac
 	fi
@@ -238,6 +243,20 @@ if command -v curl >/dev/null 2>&1; then
 		000*) rec PASS nginx.default_closed "unlisted name refused at the handshake" ;;
 		*) rec FAIL nginx.default_closed "an unlisted name was answered ($ucode)" ;;
 	esac
+fi
+
+# ---- H2: exactly one server block per name, no legacy vhost -------------------------
+for lv in ${LEGACY_VHOST_FILES:-}; do
+	if [ -e "$(hp "$lv")" ] || [ -L "$(hp "$lv")" ]; then rec FAIL "vhost.legacy" "legacy vhost still enabled: $(basename "$lv")"; else rec PASS "vhost.legacy" ""; fi
+done
+if command -v nginx >/dev/null 2>&1; then
+	nt="$(nginx -T 2>/dev/null || true)"
+	for nm in "$KC_HOSTNAME" ${LINKS_HOSTNAME:-}; do
+		c="$(printf '%s\n' "$nt" | awk -v n="$nm" '$1 == "server_name" { for (i = 2; i <= NF; i++) { x = $i; sub(/;$/, "", x); if (x == n) { c++; break } } } END { print c + 0 }')"
+		# one :80 block and one :443 block per name
+		[ "$c" = 2 ] && rec PASS "vhost.once" "$nm: one :80 and one :443 server block" || rec FAIL "vhost.once" "$nm appears in $c server_name lines (want 2: one :80, one :443)"
+	done
+	if nginx -t 2>&1 | grep -q 'conflicting server name'; then rec FAIL vhost.conflict "nginx reports a conflicting server name"; else rec PASS vhost.conflict ""; fi
 fi
 
 # ---- output ------------------------------------------------------------------------------

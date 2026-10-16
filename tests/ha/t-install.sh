@@ -74,7 +74,8 @@ has "referrer policy" "$VH" 'add_header Referrer-Policy "no-referrer" always;'
 has "frame options" "$VH" 'add_header X-Frame-Options "DENY" always;'
 has "body limit" "$VH" 'client_max_body_size 1m;'
 has "no session tickets" "$VH" 'ssl_session_tickets off;'
-has "OCSP stapling" "$VH" 'ssl_stapling on;'
+hasnt "no OCSP stapling (no chain file, CA ended OCSP)" "$VH" 'ssl_stapling'
+hasnt "no trusted-chain reference" "$VH" 'ssl_trusted_certificate'
 has "Keycloak upstream is loopback" "$VH" 'proxy_pass http://127.0.0.1:8080;'
 has "metrics endpoint is allowlisted" "$VH" 'allow 198.51.100.79/32;'
 has "metrics endpoint denies others" "$VH" 'deny all;'
@@ -130,5 +131,73 @@ IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" scripts --apply
 expect "scripts install exits 0" 0 "$RC"
 if [ -x "$R/srv/example/ha/bin/ha-backup.sh" ]; then ok "node scripts are installed executable"; else bad "ha-backup.sh not installed executable"; fi
 if [ -f "$R/srv/example/ha/realm/expected-clients.json" ]; then ok "verifier inputs shipped with the scripts"; else bad "realm inputs not shipped"; fi
+
+section "legacy vhosts, partial applies, single-host CIDRs"
+newroot
+mkdir -p "$R/srv/example/nginx/sites-available" "$R/srv/example/nginx/sites-enabled"
+for n in idp links; do
+	echo "server { server_name old; }" >"$R/srv/example/nginx/sites-available/$n.conf"
+	ln -s "$R/srv/example/nginx/sites-available/$n.conf" "$R/srv/example/nginx/sites-enabled/$n.conf"
+done
+IDPHA_RUN_STAMP=20260102T000000Z IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" nginx --apply
+expect "nginx apply with legacy vhosts exits 0" 0 "$RC"
+if [ ! -e "$R/srv/example/nginx/sites-enabled/idp.conf" ] && [ ! -L "$R/srv/example/nginx/sites-enabled/idp.conf" ]; then ok "the legacy idp vhost is disabled in the same run"; else bad "legacy idp vhost still enabled"; fi
+if [ -f "$R/srv/example/nginx/sites-available/idp.conf" ]; then ok "...but its sites-available file is untouched"; else bad "sites-available file removed"; fi
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" rollback 20260102T000000Z --apply
+if [ -L "$R/srv/example/nginx/sites-enabled/links.conf" ]; then ok "rollback restores the legacy vhost AS A SYMLINK"; else bad "legacy vhost not restored as a symlink"; fi
+rm -f "${R:?}/srv/example/nginx/sites-enabled/idp.conf"
+NGINX_FAIL=1 IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" nginx --apply
+expect "a failing nginx -t exits non-zero" 1 "$RC"
+if [ -L "$R/srv/example/nginx/sites-enabled/links.conf" ] && [ ! -e "$R/etc/nginx/conf.d/10-idpha-vhosts.conf" ]; then ok "...and the legacy vhost is back while the new files are gone"; else bad "failed run did not restore the legacy vhost"; fi
+newroot
+mv "$T/metrics.token" "$T/metrics.token.away"
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" nginx --apply
+expect "a missing token file is refused" 1 "$RC"
+if [ -z "$(find "$R" -type f 2>/dev/null)" ]; then ok "...before ANY file was written (no half-installed include)"; else bad "partial write: $(find "$R" -type f | head -3)"; fi
+mv "$T/metrics.token.away" "$T/metrics.token"
+for c in 0.0.0.0/0 198.51.100.0/24 198.51.100.7 ::/0 ::/128 0.0.0.0/32; do
+	if is_host_cidr "$c"; then bad "is_host_cidr accepted $c"; else ok "shell check refuses $c too"; fi
+done
+if is_host_cidr 198.51.100.7/32 && is_host_cidr 2001:db8::7/128 && is_host_cidr 127.0.0.1/32; then ok "shell check accepts single hosts"; else bad "single host refused"; fi
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" gate closed --apply
+has "gate always admits loopback (ssh tunnel access)" "$R/etc/nginx/snippets/idpha-gate.conf" "127.0.0.1/32 1;"
+hasnt "no operator or office source in the default gate" "$R/etc/nginx/snippets/idpha-gate.conf" "198.51.100.99"
+mkvalues "$T/v-extra.json" '.operations["ha-install"].gate_extra_allow=["198.51.100.99/32"]'
+IDPHA_PARAMS="$T/v-extra.json" IDPHA_ROOT="$R" runit "$I" gate closed --apply
+has "an operator source is admitted only when named explicitly" "$R/etc/nginx/snippets/idpha-gate.conf" "198.51.100.99/32 1;"
+
+section "backup tools: pinned, or not at all"
+newroot
+printf 'MC_URL=\nMC_SHA256=\n' >"$T/empty.pin"
+: >"$CALLS"
+TOOLS_PIN="$T/empty.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
+expect "backup-tools refuses an empty pin" 1 "$RC"
+hasnt "...and installs nothing" "$CALLS" "apt-get"
+mkdir -p "$T/dl"
+printf '#!/usr/bin/env bash\nout=""\nwhile [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done\nprintf "pinned-binary" >"$out"\n' >"$T/dl/curl"
+chmod +x "$T/dl/curl"
+good="$(printf 'pinned-binary' | sha_of)"
+printf 'MC_URL=https://example.test/mc\nMC_SHA256=%s\n' "$good" >"$T/good.pin"
+printf 'MC_URL=https://example.test/mc\nMC_SHA256=%s\n' "$(printf 'x' | sha_of)" >"$T/bad.pin"
+PATH="$T/dl:$PATH" TOOLS_PIN="$T/bad.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
+expect "a download that does not match the pin is refused" 1 "$RC"
+if [ ! -e "$R/usr/local/bin/mc" ]; then ok "...and not installed"; else bad "mismatching binary installed"; fi
+PATH="$T/dl:$PATH" TOOLS_PIN="$T/good.pin" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" backup-tools --apply
+expect "a download matching the pin installs" 0 "$RC"
+if [ -x "$R/usr/local/bin/mc" ]; then ok "...executable"; else bad "mc not installed"; fi
+has "age comes from the distribution" "$CALLS" "apt-get install -y age"
+has "the repository ships the pin file, empty until a verified artefact is chosen" "$REPO_ROOT/ha/tools.pin" "MC_SHA256="
+
+section "weekly maintenance timer"
+newroot
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" units maint --apply
+expect "maint units install" 0 "$RC"
+has "timer carries the per-node calendar from the params" "$R/etc/systemd/system/idpha-maint.timer" "OnCalendar=Sun *-*-* 02:30:00 UTC"
+has "service runs the rolling maintenance with the node params" "$R/etc/systemd/system/idpha-maint.service" "idpha-rolling-maint.sh --params /srv/example/ha/idpha-params.json --apply"
+hasnt "service never reboots" "$R/etc/systemd/system/idpha-maint.service" "--allow-reboot"
+hasnt "installing does not enable the timer" "$CALLS" "enable"
+IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$I" scripts --apply
+if [ "$(file_mode "$R/srv/example/ha/idpha-params.json")" = "600" ]; then ok "the params copy on the host is mode 600"; else bad "params copy mode"; fi
+if [ -f "$R/srv/example/ha/ha/params.schema.json" ]; then ok "the schema ships with the scripts"; else bad "schema not shipped"; fi
 
 finish "t-install"

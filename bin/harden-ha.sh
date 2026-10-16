@@ -39,13 +39,26 @@ if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "AP
 
 idpha_begin harden-ha
 mode_banner
+trap on_failure_restore EXIT
+
+# peers_match_wg: the two peer addresses in the params must be the endpoints
+# WireGuard is actually using. A wrong address does not bite while the existing
+# UDP flow sits in conntrack; it bites at the next reboot (M-9).
+peers_match_wg() {
+	local want got
+	want="$(printf '%s\n%s\n' "$PEER_PUBLIC_1" "$PEER_PUBLIC_2" | LC_ALL=C sort)"
+	got="$(wg show "$WG_IF" endpoints 2>/dev/null | awk '{sub(/:[0-9]+$/, "", $2); print $2}' | LC_ALL=C sort)" || true
+	[ -n "$got" ] || die "cannot read 'wg show $WG_IF endpoints': refusing to firewall WireGuard blind"
+	[ "$want" = "$got" ] || die "peer public addresses in the params differ from the WireGuard endpoints on this host"
+}
 
 do_ufw() {
 	require PEER_PUBLIC_1 PEER_PUBLIC_2
 	local p
 	for p in "$PEER_PUBLIC_1" "$PEER_PUBLIC_2"; do
-		is_cidr "$p" || die "peer public value '$p' is not an IPv4 address or CIDR"
+		is_ipv4 "$p" || die "peer public value '$p' is not an IPv4 address"
 	done
+	peers_match_wg
 	[[ "${SSH_PORT:-22}" =~ ^[0-9]+$ ]] || die "SSH_PORT is not numeric"
 	if is_apply; then
 		command -v "$UFW_BIN" >/dev/null 2>&1 || [ -x "$UFW_BIN" ] || die "ufw is not installed at $UFW_BIN"
@@ -73,16 +86,33 @@ do_ufw() {
 
 do_ufw_confirm() {
 	[ "${1:-}" = "--fresh-login-confirmed" ] || die "ufw-confirm needs --fresh-login-confirmed (a NEW ssh session worked, with ControlMaster off)"
-	run systemctl stop "$DEADMAN_UNIT.timer"
+	# The flag is necessary, not sufficient: the overlay and the cluster must be
+	# healthy WITH the firewall on before the safety net is removed.
+	require PATRONI_CONF
+	cluster_health || die "cluster health check failed with ufw active: leaving the dead-man timer running"
+	run systemctl stop "$DEADMAN_UNIT.timer" "$DEADMAN_UNIT.service"
+	run systemctl reset-failed "$DEADMAN_UNIT.service"
 }
 
+dropin_path() { echo "/etc/systemd/system/$1.service.d/10-after-wireguard.conf"; }
+
 do_dropins() {
-	local u
-	for u in $ORDERED_UNITS; do
-		# etcd already carries a drop-in with this name from the 2026-08 fix whose
-		# content this repo has not seen: guard it.
-		dropin_after_wg "$u" | put_file "/etc/systemd/system/$u.service.d/10-after-wireguard.conf" 644 guard
+	local u f
+	# Preflight EVERY unit before the first write (M-7). etcd already carries the
+	# 2026-08 boot-race fix: it is assert-only, never replaced (M-8).
+	f="$(hostpath "$(dropin_path etcd)")"
+	if [ -f "$f" ]; then
+		grep -q "^After=.*${WG_UNIT:-wg-quick@wg0.service}" "$f" || die "the existing etcd drop-in does not order etcd after ${WG_UNIT:-wg-quick@wg0.service}; fix it by hand (this tool never replaces it)"
+	fi
+	for u in keepalived patroni docker; do
+		if dropin_after_wg "$u" | guard_violation "$(dropin_path "$u")" && [ "$IDPHA_REPLACE_EXISTING" != "1" ]; then
+			die "$(dropin_path "$u") exists with different content; review it, then re-run with IDPHA_REPLACE_EXISTING=1"
+		fi
 	done
+	for u in keepalived patroni docker; do
+		dropin_after_wg "$u" | put_file "$(dropin_path "$u")" 644 guard
+	done
+	if [ -f "$f" ]; then okline "etcd drop-in present and orders after the overlay (left untouched)"; else dropin_after_wg etcd | put_file "$(dropin_path etcd)" 644; fi
 	run systemctl daemon-reload
 	note "NEXT (first run on a node whose keepalived is failed): systemctl reset-failed keepalived && systemctl start keepalived"
 }
@@ -111,8 +141,24 @@ OnCalendar=
 OnCalendar=*-*-* ${APT_UPGRADE_TIME} UTC
 RandomizedDelaySec=0
 CONF
+	if [ "${EXCLUDE_CLUSTER_PACKAGES:-1}" = 1 ]; then
+		# APPROVED WIDENING (patch latency; Michael, 2026-10-16), ON by default. These packages' maintainer scripts
+		# restart the service on upgrade whatever needrestart says, so a leader
+		# upgrade fails over; rolling-maint upgrades them per node after a switchover.
+		cat <<'CONF' | put_file /etc/apt/apt.conf.d/52-dotmac-idpha-blacklist 644
+// Managed by dotmac_identity_ops (bin/harden-ha.sh, exclude_cluster_packages=true).
+Unattended-Upgrade::Package-Blacklist {
+	"patroni";
+	"etcd-server";
+	"haproxy";
+	"keepalived";
+};
+CONF
+	else
+		note "cluster packages stay in unattended upgrades (exclude_cluster_packages=false)"
+	fi
 	run systemctl daemon-reload
-	note "Read back: systemctl list-timers apt-daily-upgrade.timer ; needrestart -b"
+	note "Read back: systemctl list-timers apt-daily-upgrade.timer ; needrestart -b -r l"
 }
 
 do_wait_online() {
@@ -131,16 +177,15 @@ do_rollback() {
 		ufw) run "$UFW_BIN" --force disable ;;
 		dropins)
 			local u
-			for u in $ORDERED_UNITS; do
-				[ "$u" = etcd ] && [ "$IDPHA_REPLACE_EXISTING" != "1" ] && {
-					note "keeping etcd drop-in (pre-existing since the 2026-08 fix); set IDPHA_REPLACE_EXISTING=1 to remove"
-					continue
-				}
-				remove_file "/etc/systemd/system/$u.service.d/10-after-wireguard.conf"
+			# etcd's drop-in predates this tool and is never removed here; a run
+			# that CREATED it is undone by the run-stamp restore instead.
+			for u in keepalived patroni docker; do
+				remove_file "$(dropin_path "$u")"
 			done
 			run systemctl daemon-reload
 			;;
 		upgrade-policy)
+			remove_file /etc/apt/apt.conf.d/52-dotmac-idpha-blacklist
 			remove_file /etc/needrestart/conf.d/90-dotmac-idpha.conf
 			remove_file /etc/systemd/system/apt-daily-upgrade.timer.d/90-dotmac-idpha.conf
 			run systemctl daemon-reload

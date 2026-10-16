@@ -8,9 +8,10 @@
 #   ha-install.sh nginx              http pieces + vhosts, `nginx -t`, reload
 #   ha-install.sh gate closed|open   swap the vhost allowlist (open = H7 T0 ONLY)
 #   ha-install.sh metrics-token      install the bearer map from the token file
+#   ha-install.sh backup-tools       age from apt + the sha256-pinned S3 client (ha/tools.pin)
 #   ha-install.sh scripts            copy the node-side scripts to $HA_DIR/bin
-#   ha-install.sh units backup|collector     install systemd units (timer NOT enabled)
-#   ha-install.sh timer-enable backup|collector   enable --now the timer (H3.5 / H4.1)
+#   ha-install.sh units backup|collector|maint     install systemd units (timer NOT enabled)
+#   ha-install.sh timer-enable backup|collector|maint   enable --now the timer (H3.5 / H4.1)
 #   ha-install.sh rollback <stamp>   restore one run's backups, nginx -t, reload
 #
 # Parameters: the typed params document (--params FILE|-, ha/params.schema.json), sections
@@ -43,6 +44,7 @@ if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "AP
 
 idpha_begin ha-install
 mode_banner
+trap on_failure_restore EXIT
 # Host layout, hostnames and secret-file REFERENCES come from the params document: no defaults.
 require HA_DIR KC_HOSTNAME LINKS_HOSTNAME IDP_CERT_DIR LINKS_CERT_DIR
 PARAMS_FILE="$HA_DIR/idpha-params.json"
@@ -59,7 +61,7 @@ cidr_lines() { # cidr_lines <template with %s> <cidr...>
 	local fmt="$1" c
 	shift
 	for c in "$@"; do
-		is_cidr "$c" || die "'$c' is not an IPv4 address or CIDR"
+		is_host_cidr "$c" || die "'$c' is not a single host (/32 or /128): ranges are refused"
 		# shellcheck disable=SC2059 # fmt is one of our own constants
 		printf "$fmt\n" "$c"
 	done
@@ -120,7 +122,8 @@ do_compose() {
 	! grep -q '0\.0\.0\.0' "$tmp" || die "rendered compose contains a wildcard bind"
 	if [ -r "$existing" ]; then
 		note "-- diff vs installed (password lines excluded; image/env lines only)"
-		diff <(grep -vE 'KC_DB_PASSWORD' "$existing") <(grep -vE 'KC_DB_PASSWORD' "$tmp") | sed 's/^/      /' || true
+		# keys only: a changed line is reported by NAME, never by value
+		diff <(grep -vE 'KC_DB_PASSWORD' "$existing") <(grep -vE 'KC_DB_PASSWORD' "$tmp") | grep '^[<>]' | sed -E 's/^([<>])[[:space:]]*([A-Za-z_.-]+).*/      \1 \2/' || true
 	fi
 	put_file "$COMPOSE_DEST" 600 <"$tmp"
 	if is_apply; then
@@ -145,7 +148,9 @@ do_gate() {
 	nginx_reload
 }
 
-do_metrics_token() {
+# read_bearer: validate the REFERENCED token file and leave the value in
+# METRICS_BEARER (never printed). Used by the preflight and the writer.
+read_bearer() {
 	require METRICS_TOKEN_FILE
 	[ -r "$METRICS_TOKEN_FILE" ] || die "metrics token file not readable (root 600; the operator places the bearer value there)"
 	if [ "${IDPHA_ALLOW_UNSAFE_VALUES:-0}" != "1" ]; then
@@ -154,33 +159,49 @@ do_metrics_token() {
 	METRICS_BEARER="$(tr -d '\n\r' <"$METRICS_TOKEN_FILE")"
 	[[ "$METRICS_BEARER" =~ ^[A-Za-z0-9._~+-]{32,}$ ]] || die "metrics bearer must be at least 32 characters of [A-Za-z0-9._~+-]"
 	export METRICS_BEARER
+}
+
+do_metrics_token() {
+	read_bearer
 	render "$REPO_ROOT/ha/nginx/metrics-token.conf.tmpl" | put_file "$TOKEN_CONF_DEST" 600
 	unset METRICS_BEARER
 }
 
-do_nginx() {
+# nginx_preflight: validate and compute EVERY input before the first write (M-7).
+nginx_preflight() {
 	require PEER_OVERLAY_1 PEER_OVERLAY_2 GATE_ALLOW METRICS_ALLOW LINKS_ROOT
 	is_ipv4 "$PEER_OVERLAY_1" && is_ipv4 "$PEER_OVERLAY_2" || die "peer overlay values are not IPv4 addresses"
 	hostname_ok "$KC_HOSTNAME" && hostname_ok "$LINKS_HOSTNAME" || die "hostnames must be plain DNS names"
 	[[ "$LINKS_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "LINKS_ROOT must be an absolute plain path"
 	# shellcheck disable=SC2086
-	METRICS_ALLOW_LINES="$(cidr_lines '        allow %s;' $METRICS_ALLOW)"
-	export METRICS_ALLOW_LINES PEER_OVERLAY_1 PEER_OVERLAY_2 LINKS_ROOT
+	METRICS_ALLOW_LINES="$(cidr_lines '        allow %s;' $METRICS_ALLOW)" || exit 1
+	# shellcheck disable=SC2086
+	GATE_ALLOW_LINES="$(cidr_lines '    %s 1;' $GATE_ALLOW ${GATE_EXTRA_ALLOW:-} 127.0.0.1/32)" || exit 1
+	read_bearer
+	unset METRICS_BEARER
+	export METRICS_ALLOW_LINES GATE_ALLOW_LINES PEER_OVERLAY_1 PEER_OVERLAY_2 LINKS_ROOT
+}
+
+do_nginx() {
+	nginx_preflight
 	render "$REPO_ROOT/ha/nginx/00-idpha-http.conf.tmpl" | put_file "$NGINX_HTTP_DEST" 644
 	# The gate and the token map must exist before nginx can load the http pieces.
 	# Never silently open: a missing gate file is created CLOSED.
 	[ -e "$(hostpath "$GATE_DEST")" ] || do_gate_noreload
 	[ -e "$(hostpath "$TOKEN_CONF_DEST")" ] || do_metrics_token
 	render "$REPO_ROOT/ha/nginx/idpha-vhosts.conf.tmpl" | put_file "$NGINX_VHOST_DEST" 644
+	# The old enabled vhosts for the same names must go in THIS run, or the
+	# ungated one comes back the day conf.d is removed (M-2).
+	local lv
+	for lv in ${LEGACY_VHOST_FILES:-}; do remove_file "$lv"; done
 	nginx_reload
 }
 
 do_gate_noreload() {
 	require GATE_ALLOW
-	local allow
+	# Observe sources, any explicit operator widening, and loopback (ssh tunnel).
 	# shellcheck disable=SC2086
-	allow="$(cidr_lines '    %s 1;' $GATE_ALLOW)"
-	GATE_ALLOW_LINES="$allow"
+	GATE_ALLOW_LINES="$(cidr_lines '    %s 1;' $GATE_ALLOW ${GATE_EXTRA_ALLOW:-} 127.0.0.1/32)" || exit 1
 	export GATE_ALLOW_LINES
 	render "$REPO_ROOT/ha/nginx/gate-closed.conf.tmpl" | put_file "$GATE_DEST" 644
 }
@@ -208,15 +229,46 @@ unit_names() {
 	case "$1" in
 		backup) echo "keycloak-ha-backup" ;;
 		collector) echo "idpha-collect" ;;
-		*) die "units/timer-enable take 'backup' or 'collector'" ;;
+		maint) echo "idpha-maint" ;;
+		*) die "units/timer-enable take 'backup', 'collector' or 'maint'" ;;
 	esac
+}
+
+# backup-tools: age from the distribution, the S3 client from the PINNED
+# artefact only (ha/tools.pin). Refuses while the pin is empty or on any hash mismatch.
+do_backup_tools() {
+	local pin="${TOOLS_PIN:-$REPO_ROOT/ha/tools.pin}" url sum tmp
+	url="$(sed -n 's/^MC_URL=//p' "$pin")"
+	sum="$(sed -n 's/^MC_SHA256=//p' "$pin")"
+	[ -n "$url" ] && [ -n "$sum" ] || die "ha/tools.pin has no pinned S3 client (MC_URL / MC_SHA256 empty): an unpinned download is never acceptable"
+	[[ "$url" =~ ^https://[A-Za-z0-9./_-]+$ ]] || die "MC_URL must be a plain https URL"
+	[[ "$sum" =~ ^[0-9a-f]{64}$ ]] || die "MC_SHA256 must be 64 lowercase hex characters"
+	run apt-get install -y age
+	if is_apply; then
+		tmp="$(mktemp)"
+		curl -fsSL --proto '=https' --max-time 120 -o "$tmp" "$url" || die "download of the pinned S3 client failed"
+		[ "$(sha_of <"$tmp")" = "$sum" ] || {
+			rm -f "$tmp"
+			die "downloaded S3 client does not match the pinned sha256: NOT installed"
+		}
+		put_file /usr/local/bin/mc 755 <"$tmp"
+		rm -f "$tmp"
+	else
+		planline "download the pinned S3 client (sha256 ${sum:0:12}...) and install it to /usr/local/bin/mc"
+		effect "$(_tab download "$url sha256:$sum")"
+	fi
 }
 
 do_units() {
 	local n
 	n="$(unit_names "${1:-}")"
 	if [ "$1" = backup ]; then require BACKUP_ENV_FILE; else BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-/nonexistent}"; fi
-	export BACKUP_ENV_FILE PARAMS_FILE
+	if [ "$1" = maint ]; then
+		require MAINT_ON_CALENDAR
+	else
+		MAINT_ON_CALENDAR="${MAINT_ON_CALENDAR:-unused}"
+	fi
+	export BACKUP_ENV_FILE PARAMS_FILE MAINT_ON_CALENDAR
 	render "$REPO_ROOT/ha/systemd/$n.service" | put_file "/etc/systemd/system/$n.service" 644
 	render "$REPO_ROOT/ha/systemd/$n.timer" | put_file "/etc/systemd/system/$n.timer" 644
 	run systemctl daemon-reload
@@ -234,6 +286,7 @@ do_timer_enable() {
 }
 
 case "$cmd" in
+	backup-tools) do_backup_tools ;;
 	scripts) do_scripts ;;
 	units) do_units "${1:-}" ;;
 	timer-enable) do_timer_enable "${1:-}" ;;

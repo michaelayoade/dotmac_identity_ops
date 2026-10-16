@@ -70,15 +70,12 @@ fi
 # ---- etcd --------------------------------------------------------------------
 declare_metric idpha_etcd_members_healthy "members answering the health check"
 declare_metric idpha_etcd_has_leader "1 if exactly one member reports itself leader"
-if command -v etcdctl >/dev/null 2>&1 && { health="$(ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint health --cluster 2>&1)" || [ -n "$health" ]; }; then
-	emit idpha_etcd_members_healthy "$nl" "$(printf '%s\n' "$health" | grep -c 'is healthy' || true)"
-	if status="$(ETCDCTL_API=3 etcdctl --endpoints=http://127.0.0.1:2379 endpoint status --cluster -w tsv 2>/dev/null)"; then
-		leaders="$(printf '%s\n' "$status" | awk -F'\t' '$5 == "true" {n++} END {print n + 0}')"
-		emit idpha_etcd_has_leader "$nl" "$([ "$leaders" = "1" ] && echo 1 || echo 0)"
-		checkok etcd 1
-	else
-		checkok etcd 0
-	fi
+# etcdctl 3.4 rejects "-w tsv": JSON output, parsed by lib-idpha.sh (etcd_summary).
+if es="$(etcd_summary)" && [ -n "$es" ]; then
+	set -- $es
+	emit idpha_etcd_members_healthy "$nl" "$1"
+	emit idpha_etcd_has_leader "$nl" "$([ "$2" = "1" ] && echo 1 || echo 0)"
+	checkok etcd 1
 else
 	checkok etcd 0
 fi
@@ -143,9 +140,33 @@ mkdir -p "$IDPHA_STATE_DIR/cache" 2>/dev/null || true
 declare_metric idpha_needrestart_pending "services needrestart would restart"
 nrc="$IDPHA_STATE_DIR/cache/needrestart"
 if ! cache_fresh "$nrc"; then
-	needrestart -b 2>/dev/null | grep -c '^NEEDRESTART-SVC:' >"$nrc" || true
+	needrestart -b -r l 2>/dev/null | grep -c '^NEEDRESTART-SVC:' >"$nrc" || true
 fi
 if [ -r "$nrc" ]; then emit idpha_needrestart_pending "$nl" "$(tr -dc '0-9' <"$nrc")"; fi
+
+# Excluded cluster packages with a security update waiting (they are upgraded by
+# the weekly rolling maintenance, not by unattended upgrades). The age is tracked
+# from the first run that saw the update, so "pending > 8 days" is alertable.
+declare_metric idpha_cluster_pkg_pending_age_seconds "seconds a security update has been pending for an excluded cluster package (0 = none)"
+pk_cache="$IDPHA_STATE_DIR/cache/pkgpending"
+if ! cache_fresh "$pk_cache.stamp"; then
+	sim="$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null || true)"
+	for pkg in patroni etcd-server haproxy keepalived; do
+		if printf '%s\n' "$sim" | grep -E "^Inst $pkg " | grep -qi security; then
+			[ -f "$pk_cache.$pkg" ] || date +%s >"$pk_cache.$pkg"
+		else
+			rm -f "$pk_cache.$pkg"
+		fi
+	done
+	touch "$pk_cache.stamp"
+fi
+for pkg in patroni etcd-server haproxy keepalived; do
+	if [ -f "$pk_cache.$pkg" ]; then
+		emit idpha_cluster_pkg_pending_age_seconds "$nl,pkg=\"$pkg\"" "$(( $(date +%s) - $(tr -dc '0-9' <"$pk_cache.$pkg") ))"
+	else
+		emit idpha_cluster_pkg_pending_age_seconds "$nl,pkg=\"$pkg\"" 0
+	fi
+done
 
 declare_metric idpha_cert_not_after_seconds "certificate notAfter as unix time"
 for pair in ${CERT_FILES:-}; do

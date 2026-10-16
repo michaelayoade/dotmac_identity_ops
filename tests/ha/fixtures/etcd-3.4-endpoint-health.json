@@ -1,0 +1,1 @@
+[{"endpoint":"http://192.0.2.1:2379","health":true,"took":"2.6ms"},{"endpoint":"http://192.0.2.2:2379","health":true,"took":"3.1ms"},{"endpoint":"http://192.0.2.3:2379","health":true,"took":"3.4ms"}]

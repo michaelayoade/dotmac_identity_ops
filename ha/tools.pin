@@ -1,0 +1,11 @@
+# Pinned third-party tool for the HA backup (M-4): the S3 client, by URL + sha256.
+# NEVER an unpinned image or "latest". `bin/ha-install.sh backup-tools` refuses while
+# either value is empty or when the downloaded bytes do not hash to MC_SHA256.
+#
+# OPEN DECISION: the vendor's download site now answers 410 Gone (project archived),
+# so no verifiable public source exists today. Fill these from an artefact YOU have
+# verified (for example the binary lifted from the exact image digest the single
+# host already runs, or an internal mirror), or replace the S3 client. Until then
+# the backup cannot be installed, deliberately.
+MC_URL=
+MC_SHA256=

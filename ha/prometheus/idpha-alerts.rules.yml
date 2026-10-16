@@ -17,10 +17,10 @@ groups:
         annotations:
           summary: "Patroni timeline changed (a failover or switchover happened)"
       - alert: IdpHaFailoverRepeated
-        expr: sum(changes(idpha_patroni_timeline[24h])) > 1
+        expr: max(changes(idpha_patroni_timeline[24h])) > 1
         labels: {severity: critical, phase: always}
         annotations:
-          summary: "More than one Patroni timeline change in 24 h (the H-F1 pattern)"
+          summary: "More than one Patroni timeline change in 24 h (the H-F1 pattern). Silence during the planned weekly maintenance."
       - alert: IdpHaReplicationLag
         expr: max(idpha_patroni_lag_bytes) > 1e6
         for: 2m
@@ -99,6 +99,11 @@ groups:
         labels: {severity: warning, phase: always}
         annotations:
           summary: "Restarts or a reboot have been pending on {{ $labels.node }} for 8 days"
+      - alert: IdpHaClusterPackageUpdateOverdue
+        expr: idpha_cluster_pkg_pending_age_seconds > 8 * 86400
+        labels: {severity: warning, phase: always}
+        annotations:
+          summary: "A security update for {{ $labels.pkg }} on {{ $labels.node }} has been pending for over 8 days (excluded from unattended upgrades; run the weekly maintenance)"
       - alert: IdpHaWireguardPeerStale
         expr: idpha_wg_handshake_age_seconds > 300
         for: 2m

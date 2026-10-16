@@ -14,7 +14,7 @@
 # Parameters: the typed params document (sections node, ha-backup). Required there: the store
 # alias, bucket, prefix, age recipient file and the dump flags (no default on purpose: they MUST
 # match the single-host backup so the existing validator needs no change). Optional: KC_DB_NAME (keycloak) PG_DUMP_USER (postgres) PATRONI_PORT (8008)
-#           MIN_CIPHERTEXT_BYTES (1024) IDPHA_STATE_DIR (/var/lib/idpha)
+#           MIN_CIPHERTEXT_BYTES (10240, the single host's own floor) IDPHA_STATE_DIR (/var/lib/idpha)
 # Object-store credentials arrive as MC_HOST_<alias> in the environment from the
 # unit's EnvironmentFile; they are never read from, or written to, this repo.
 
@@ -33,7 +33,7 @@ is_ipv4 "$OVERLAY_ADDR" || die "OVERLAY_ADDR is not an IPv4 address"
 KC_DB_NAME="${KC_DB_NAME:-keycloak}"
 PG_DUMP_USER="${PG_DUMP_USER:-postgres}"
 PATRONI_PORT="${PATRONI_PORT:-8008}"
-MIN_CIPHERTEXT_BYTES="${MIN_CIPHERTEXT_BYTES:-1024}"
+MIN_CIPHERTEXT_BYTES="${MIN_CIPHERTEXT_BYTES:-10240}"
 IDPHA_STATE_DIR="${IDPHA_STATE_DIR:-/var/lib/idpha}"
 
 # ---- leader guard -----------------------------------------------------------
@@ -60,6 +60,8 @@ if ! is_apply; then
 fi
 
 [ -r "$BACKUP_AGE_RECIPIENT_FILE" ] || die "age recipient file not readable"
+command -v age >/dev/null 2>&1 || die "age is not installed (ha-install.sh backup-tools)"
+command -v mc >/dev/null 2>&1 || die "the pinned S3 client is not installed (ha-install.sh backup-tools)"
 umask 077
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT
@@ -72,7 +74,8 @@ size="$(wc -c <"$staged" | tr -d ' ')"
 [ "$size" -ge "$MIN_CIPHERTEXT_BYTES" ] || die "ciphertext is only $size bytes: refusing to upload a truncated backup"
 head -c 21 "$staged" | grep -q '^age-encryption.org/v1' || die "staged object has no age header: refusing to upload"
 
-mc cp --quiet "$staged" "$dest" >/dev/null
+mkdir -p "$IDPHA_STATE_DIR/mc"
+mc --config-dir "$IDPHA_STATE_DIR/mc" cp --quiet "$staged" "$dest" >/dev/null
 mkdir -p "$IDPHA_STATE_DIR"
 date +%s >"$IDPHA_STATE_DIR/backup.last.tmp"
 mv "$IDPHA_STATE_DIR/backup.last.tmp" "$IDPHA_STATE_DIR/backup.last"

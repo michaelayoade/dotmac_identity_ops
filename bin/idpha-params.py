@@ -28,7 +28,8 @@ KNOWN = {"$schema", "$id", "$defs", "$ref", "title", "description", "type", "enu
 def fmt_ok(name, v):
     if name == "ipv4":
         try:
-            return isinstance(ipaddress.ip_address(v), ipaddress.IPv4Address) and re.fullmatch(r"\d+(\.\d+){3}", v) is not None
+            a = ipaddress.ip_address(v)
+            return isinstance(a, ipaddress.IPv4Address) and re.fullmatch(r"\d+(\.\d+){3}", v) is not None and not (a.is_unspecified or a.is_multicast)
         except ValueError:
             return False
     if name == "cidr4":
@@ -37,10 +38,17 @@ def fmt_ok(name, v):
             return n.version == 4 and "/" in v
         except ValueError:
             return False
+    if name == "hostcidr":
+        # a SINGLE host only: IPv4 /32 or IPv6 /128, never a range (M-1)
+        try:
+            n = ipaddress.ip_network(v, strict=True)
+        except ValueError:
+            return False
+        return "/" in v and n.num_addresses == 1 and not n.is_unspecified and not n.is_multicast
     if name == "hostname":
         return re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+", v) is not None
     if name == "abs-path":
-        return re.fullmatch(r"/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*", v) is not None
+        return re.fullmatch(r"/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*", v) is not None and not any(seg in (".", "..") for seg in v.split("/"))
     raise ValueError("unknown format " + name)
 
 
@@ -127,7 +135,8 @@ ENV_NODE = {"name": "NODE_NAME", "overlay_addr": "OVERLAY_ADDR", "vip_addr": "VI
             "primary_nic": "PRIMARY_NIC", "ssh_port": "SSH_PORT"}
 
 
-ALSO = {"host-check": [("harden-ha", ["apt_upgrade_time"]), ("ha-install", ["kc_hostname"])]}
+ALSO = {"ha-install": [("rolling-maint", ["maint_on_calendar"])],
+        "host-check": [("harden-ha", ["apt_upgrade_time"]), ("ha-install", ["kc_hostname", "links_hostname", "legacy_vhost_files"])]}
 
 
 def scalar(v):
@@ -165,7 +174,7 @@ def export(doc, op):
     print("export " + " ".join(sorted(out)))
 
 
-def plan_doc(op, node, effects_path):
+def plan_doc(op, node, effects_path, tool=None, params_path=None):
     effects = []
     with open(effects_path, encoding="utf-8") as f:
         for line in f:
@@ -175,7 +184,7 @@ def plan_doc(op, node, effects_path):
             parts = line.split("\t")
             kind = parts[0]
             if kind == "write":
-                effects.append({"kind": "write", "path": parts[1], "mode": parts[2], "sha256": parts[3], "replaces": parts[4] == "1"})
+                effects.append({"kind": "write", "path": parts[1], "mode": parts[2], "sha256": parts[3], "pre_sha256": parts[4] if len(parts) > 4 else ""})
             elif kind == "remove":
                 effects.append({"kind": "remove", "path": parts[1]})
             elif kind == "restore":
@@ -183,6 +192,11 @@ def plan_doc(op, node, effects_path):
             else:
                 effects.append({"kind": kind, "detail": parts[1] if len(parts) > 1 else ""})
     body = {"operation": op, "node": node, "effects": effects}
+    if tool:
+        body["tool"] = dict(kv.split("=", 1) for kv in tool)
+    if params_path:
+        # canonical params: references only, no secret content ever lives in it
+        body["params_sha256"] = hashlib.sha256(json.dumps(load(params_path), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     canon = json.dumps(body, sort_keys=True, separators=(",", ":"))
     body["digest"] = "sha256:" + hashlib.sha256(canon.encode()).hexdigest()
     print(json.dumps(body, sort_keys=True, indent=2))
@@ -201,10 +215,12 @@ def main():
     s.add_argument("--op", required=True)
     s.add_argument("--node", required=True)
     s.add_argument("--effects", required=True)
+    s.add_argument("--tool", action="append")
+    s.add_argument("--params")
     sub.add_parser("digest-of")
     a = ap.parse_args()
     if a.cmd == "plan-doc":
-        plan_doc(a.op, a.node, a.effects)
+        plan_doc(a.op, a.node, a.effects, a.tool, a.params)
         return
     if a.cmd == "digest-of":
         print(json.load(sys.stdin)["digest"])

@@ -8,7 +8,7 @@
 #     NEVER in this repository and are NOT hand-authored files. They arrive as
 #     ONE typed params document (--params <file|-> or IDPHA_PARAMS), validated
 #     against ha/params.schema.json before anything runs. The document carries
-#     no secret: credentials are named by reference (a root-600 file on the host).
+#     no confidential content; credentials are named by reference (a root-600 file on the host).
 #   * --plan prints the effect summary as JSON with a digest; --apply must carry
 #     --expect-digest <digest>, re-plans, and refuses if the digest differs, so
 #     an approval binds exactly what was previewed.
@@ -25,7 +25,7 @@ IDPHA_BACKUP_DIR="${IDPHA_BACKUP_DIR:-/var/lib/idpha/backup}"
 IDPHA_ROOT="${IDPHA_ROOT:-}" # test hook: prefix for every host path written
 # One stamp per run: every file replaced in this run lands under one backup dir,
 # so a rollback of the run is one copy back.
-IDPHA_RUN_STAMP="${IDPHA_RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)}"
+IDPHA_RUN_STAMP="${IDPHA_RUN_STAMP:-$(date -u +%Y%m%dT%H%M%SZ)-$$}" # pid suffix: two runs in one second never share a backup dir
 APPLY="${APPLY:-0}"
 IDPHA_REPLACE_EXISTING="${IDPHA_REPLACE_EXISTING:-0}"
 
@@ -83,6 +83,13 @@ is_ipv4() {
 	# shellcheck disable=SC2086
 	set -- $ip
 	for o in "$@"; do [ "$o" -le 255 ] || return 1; done
+}
+# is_host_cidr: a SINGLE host, spelled with its full-length prefix (/32 or /128).
+is_host_cidr() {
+	local c="$1"
+	if [[ "$c" == */32 ]]; then is_ipv4 "${c%/32}" && [ "${c%/32}" != "0.0.0.0" ]; return; fi
+	if [[ "$c" == */128 && "$c" == *:* ]]; then [[ "${c%/128}" =~ ^[0-9a-fA-F:]+$ ]] && [ "${c%/128}" != "::" ]; return; fi
+	return 1
 }
 is_cidr() {
 	local c="$1"
@@ -144,7 +151,7 @@ put_file() {
 	fi
 	if ! is_apply; then
 		planline "write $dest mode $mode sha256 ${newsum:0:12} ($([ -n "$oldsum" ] && echo replaces || echo new))"
-		effect "$(_tab write "$dest" "$mode" "$newsum" "$([ -n "$oldsum" ] && echo 1 || echo 0)")"
+		effect "$(_tab write "$dest" "$mode" "$newsum" "$oldsum")"
 		rm -f "$tmp"
 		return 0
 	fi
@@ -168,7 +175,7 @@ put_file() {
 remove_file() {
 	local dest="$1" real
 	real="$(hostpath "$dest")"
-	[ -e "$real" ] || {
+	[ -e "$real" ] || [ -L "$real" ] || {
 		okline "$dest already absent"
 		return 0
 	}
@@ -180,7 +187,7 @@ remove_file() {
 	local bdir
 	bdir="$(hostpath "$IDPHA_BACKUP_DIR")/$IDPHA_RUN_STAMP"
 	mkdir -p "$bdir$(dirname "$dest")"
-	cp -p "$real" "$bdir$dest"
+	cp -Pp "$real" "$bdir$dest" # -P: a symlink is saved AS a symlink
 	rm -f "$real"
 	okline "removed $dest (copy in $bdir)"
 }
@@ -258,7 +265,14 @@ idpha_begin() {
 	[ -r "$IDPHA_PARAMS" ] || die "params document is not readable"
 	exports="$(python3 -I "$tool" export --schema "$IDPHA_SCHEMA" --params "$IDPHA_PARAMS" --op "$IDPHA_OP")" || exit 1
 	eval "$exports"
+	# Interface-level defaults that are not topology (named in the schema as optional).
+	WG_IF="${WG_IF:-wg0}"
+	WG_UNIT="${WG_UNIT:-wg-quick@${WG_IF}.service}"
+	WG_PORT="${WG_PORT:-51820}"
+	SSH_PORT="${SSH_PORT:-22}"
+	PRIMARY_NIC="${PRIMARY_NIC:-eth0}"
 	if [ "$PLAN_JSON" = 1 ]; then exec 4>&1 1>&2; fi
+	[ "$kind" = runtime ] || host_identity_check
 	if is_apply && [ "$kind" != runtime ] && [ -z "${IDPHA_CHILD:-}" ]; then
 		if [ -n "$IDPHA_EXPECT_DIGEST" ]; then
 			local got
@@ -274,7 +288,19 @@ idpha_begin() {
 # idpha_end: print the --plan JSON (effects + digest). Call as the last step.
 idpha_end() {
 	if [ "$PLAN_JSON" = 1 ]; then
-		python3 -I "$_IDPHA_LIB_DIR/idpha-params.py" plan-doc --op "$IDPHA_OP" --node "${NODE_NAME:-unknown}" --effects "$IDPHA_EFFECTS" >&4
+		# The digest also binds the tool: this script, the lib, the validator, the
+		# schema and every template/reviewed file, so a changed commit cannot
+		# ride on an old approval.
+		local tools_sha script_sha
+		script_sha="$(sha_of <"$0")"
+		tools_sha="$({
+			cat "$_IDPHA_LIB_DIR/lib-idpha.sh" "$_IDPHA_LIB_DIR/idpha-params.py" "$IDPHA_SCHEMA"
+			find "$_IDPHA_LIB_DIR/../ha" -type f 2>/dev/null | LC_ALL=C sort | while IFS= read -r f; do cat "$f"; done
+		} 2>/dev/null | sha_of)"
+		python3 -I "$_IDPHA_LIB_DIR/idpha-params.py" plan-doc --op "$IDPHA_OP" --node "${NODE_NAME:-unknown}" --effects "$IDPHA_EFFECTS" --params "$IDPHA_PARAMS" --tool "script=$script_sha" --tool "bundle=$tools_sha" >&4
+	fi
+	if is_apply && [ -d "$(hostpath "$IDPHA_BACKUP_DIR")/$IDPHA_RUN_STAMP" ]; then
+		printf '{"operation":"%s","stamp":"%s","approved_digest":"%s"}\n' "$IDPHA_OP" "$IDPHA_RUN_STAMP" "${IDPHA_EXPECT_DIGEST:-unbound}" >"$(hostpath "$IDPHA_BACKUP_DIR")/$IDPHA_RUN_STAMP/applied.json"
 	fi
 	rm -f "$IDPHA_EFFECTS" "${_IDPHA_TMP_PARAMS:-}"
 }
@@ -329,20 +355,21 @@ CONF
 # every file that run created. Refuses an unknown stamp.
 restore_run() {
 	local stamp="$1" bdir f rel
-	[[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "backup stamp '$stamp' is not of the form YYYYMMDDTHHMMSSZ"
+	[[ "$stamp" =~ ^[0-9]{8}T[0-9]{6}Z(-[0-9]+)?$ ]] || die "backup stamp '$stamp' is not of the form YYYYMMDDTHHMMSSZ"
 	bdir="$(hostpath "$IDPHA_BACKUP_DIR")/$stamp"
 	[ -d "$bdir" ] || die "no backup run $stamp under $IDPHA_BACKUP_DIR"
 	while IFS= read -r f; do
 		rel="${f#"$bdir"}"
 		if is_apply; then
 			mkdir -p "$(dirname "$(hostpath "$rel")")"
-			cp -p "$f" "$(hostpath "$rel")"
+			rm -f "$(hostpath "$rel")"
+			cp -Pp "$f" "$(hostpath "$rel")"
 			okline "restored $rel"
 		else
 			planline "restore $rel"
 			effect "$(_tab restore "$rel")"
 		fi
-	done < <(find "$bdir" -type f ! -name .created)
+	done < <(find "$bdir" \( -type f -o -type l \) ! -name .created ! -name applied.json)
 	if [ -f "$bdir/.created" ]; then
 		while IFS= read -r rel; do
 			if is_apply; then
@@ -354,4 +381,88 @@ restore_run() {
 			fi
 		done <"$bdir/.created"
 	fi
+}
+
+# on_failure_restore: EXIT trap for state-changing scripts. Any non-zero exit in
+# apply mode puts this run's files back (M-7), so a half-applied run never
+# survives. Harmless when nothing was written.
+on_failure_restore() {
+	local rc=$?
+	if [ "$rc" -ne 0 ] && is_apply && [ -d "$(hostpath "$IDPHA_BACKUP_DIR")/$IDPHA_RUN_STAMP" ]; then
+		echo "run failed (exit $rc): restoring this run's files ($IDPHA_RUN_STAMP)" >&2
+		restore_run "$IDPHA_RUN_STAMP" >&2 || true
+	fi
+	return "$rc"
+}
+
+# would_refuse <dest> <guard>: preflight twin of put_file's guard, used to
+# validate EVERY write before the first one (M-7). Content on stdin.
+guard_violation() {
+	local dest="$1" real
+	real="$(hostpath "$dest")"
+	[ -f "$real" ] || return 1
+	[ "$(sha_of <"$real")" = "$(sha_of)" ] && return 1
+	return 0
+}
+
+# etcd_summary: "<healthy members> <leader count>" from etcdctl's JSON output
+# (3.4 rejects -w tsv). Empty output = could not look.
+etcd_summary() {
+	local ep="${ETCD_ENDPOINT:-http://127.0.0.1:2379}" h st
+	command -v etcdctl >/dev/null 2>&1 || return 1
+	h="$(ETCDCTL_API=3 etcdctl --endpoints="$ep" endpoint health --cluster -w json 2>/dev/null)" || true
+	st="$(ETCDCTL_API=3 etcdctl --endpoints="$ep" endpoint status --cluster -w json 2>/dev/null)" || return 1
+	[ -n "$st" ] || return 1
+	python3 -I -c '
+import json, sys
+h = json.loads(sys.argv[1] or "[]")
+s = json.loads(sys.argv[2])
+healthy = sum(1 for m in h if m.get("health"))
+leaders = sum(1 for m in s if m["Status"]["leader"] == m["Status"]["header"]["member_id"])
+print(healthy, leaders)
+' "$h" "$st"
+}
+
+# cluster_health: the HC set — WireGuard handshakes < 150 s, etcd 3/3 with one
+# leader, Patroni 3 members / 1 leader / all running-streaming. Prints why on failure.
+cluster_health() {
+	local es now ts cnt=0 stale=0 table verdict
+	es="$(etcd_summary)" || {
+		echo "      etcd: could not read status"
+		return 1
+	}
+	[ "$es" = "3 1" ] || {
+		echo "      etcd healthy/leaders = $es (want 3 1)"
+		return 1
+	}
+	table="$("${PATRONICTL:-patronictl}" -c "${PATRONI_CONF:?}" list -f tsv 2>/dev/null)" || {
+		echo "      patronictl list failed"
+		return 1
+	}
+	verdict="$(printf '%s\n' "$table" | awk -F'\t' '
+		NR == 1 { for (i = 1; i <= NF; i++) { if ($i == "Role") r = i; if ($i == "State") s = i } next }
+		{ n++; if ($r ~ /Leader/) l++; if ($s != "running" && $s != "streaming") b++ }
+		END { printf "%d/%d/%d", n, l + 0, b + 0 }')"
+	[ "$verdict" = "3/1/0" ] || {
+		echo "      patroni members/leaders/notok = $verdict (want 3/1/0)"
+		return 1
+	}
+	now="$(date +%s)"
+	while read -r _ ts; do
+		[ -n "${ts:-}" ] || continue
+		cnt=$((cnt + 1))
+		{ [ "$ts" -gt 0 ] && [ $((now - ts)) -lt 150 ]; } || stale=$((stale + 1))
+	done < <(wg show "${WG_IF:-wg0}" latest-handshakes 2>/dev/null)
+	[ "$cnt" -ge 2 ] && [ "$stale" = 0 ] || {
+		echo "      wireguard: $stale stale of $cnt peers"
+		return 1
+	}
+}
+
+# host_identity_check: the params describe THIS node. The overlay address must be
+# on the WireGuard interface here, or the run is aimed at the wrong host.
+host_identity_check() {
+	[ -n "${OVERLAY_ADDR:-}" ] || return 0
+	ip -4 -o addr show dev "${WG_IF:-wg0}" 2>/dev/null | grep -q " ${OVERLAY_ADDR}/" ||
+		die "this host does not carry the overlay address ${OVERLAY_ADDR} on ${WG_IF:-wg0}: params are for another node"
 }

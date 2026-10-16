@@ -43,7 +43,7 @@ STUB="$T/stubs"
 mkdir -p "$STUB"
 CALLS="$T/calls.log"
 : >"$CALLS"
-for c in ufw systemd-run systemctl docker mc runuser needrestart; do
+for c in ufw systemd-run systemctl docker mc runuser needrestart apt-get; do
 	{
 		echo '#!/usr/bin/env bash'
 		echo "echo \"$c \$*\" >>\"$CALLS\""
@@ -51,6 +51,38 @@ for c in ufw systemd-run systemctl docker mc runuser needrestart; do
 	} >"$STUB/$c"
 	chmod +x "$STUB/$c"
 done
+FIX="$REPO_ROOT/tests/ha/fixtures"
+cat >"$STUB/ip" <<'STUBEOF'
+#!/usr/bin/env bash
+echo "3: wg0    inet 192.0.2.1/24 scope global wg0"
+STUBEOF
+cat >"$STUB/wg" <<'STUBEOF'
+#!/usr/bin/env bash
+now="$(date +%s)"
+case "$*" in
+	*endpoints*) printf 'KEYA\t198.51.100.2:51820\nKEYB\t198.51.100.3:51820\n' ;;
+	*latest-handshakes*) printf 'KEYA\t%s\nKEYB\t%s\n' "$((now - 30))" "$((now - 70))" ;;
+esac
+STUBEOF
+# etcdctl 3.4.30: "-w tsv" is rejected, JSON is replayed from the fixtures.
+{
+	echo '#!/usr/bin/env bash'
+	echo 'case "$*" in *"-w tsv"*) echo "Error: unsupported output format" >&2; exit 1 ;; esac'
+	echo "FIXDIR='$FIX'"
+	echo 'mode="${ETCD_MODE:-ok}"'
+	echo '[ "$mode" = missing ] && exit 127'
+	echo 'case "$*" in'
+	echo '  *"endpoint health"*) if [ "$mode" = degraded ]; then sed "s/\"health\":true/\"health\":false/" "$FIXDIR/etcd-3.4-endpoint-health.json" | sed "s/false/true/2g"; else cat "$FIXDIR/etcd-3.4-endpoint-health.json"; fi ;;'
+	echo '  *"endpoint status"*) if [ "$mode" = noleader ]; then sed "s/\"leader\":[0-9]*/\"leader\":1/g" "$FIXDIR/etcd-3.4-endpoint-status.json"; else cat "$FIXDIR/etcd-3.4-endpoint-status.json"; fi ;;'
+	echo 'esac'
+} >"$STUB/etcdctl"
+printf 'Cluster\tMember\tHost\tRole\tState\tTL\tLag in MB\nc\tn1\th\tLeader\trunning\t5\t\nc\tn2\th\tSync Standby\tstreaming\t5\t0\nc\tn3\th\tReplica\tstreaming\t5\t0\n' >"$T/default-patroni.list"
+{
+	echo '#!/usr/bin/env bash'
+	echo "echo \"patronictl \$*\" >>\"$CALLS\""
+	echo "case \"\$*\" in *'list -f tsv'*) cat '$T/default-patroni.list' ;; esac"
+} >"$STUB/patronictl"
+chmod +x "$STUB/ip" "$STUB/wg" "$STUB/etcdctl" "$STUB/patronictl"
 # systemctl: nothing is active unless a test says so
 {
 	echo '#!/usr/bin/env bash'
@@ -96,6 +128,7 @@ mkvalues() {
       "links_cert_dir": "/srv/example/tls/links",
       "links_root": "/srv/example/links",
       "gate_allow": ["198.51.100.77/32", "198.51.100.78/32"],
+      "legacy_vhost_files": ["/srv/example/nginx/sites-enabled/idp.conf", "/srv/example/nginx/sites-enabled/links.conf"],
       "metrics_allow": ["198.51.100.79/32"],
       "metrics_token_file": "$T/metrics.token",
       "backup_env_file": "/srv/example/backup.env"
@@ -106,12 +139,12 @@ mkvalues() {
       "backup_bucket": "example-bucket",
       "backup_prefix": "ha",
       "backup_age_recipient_file": "$T/recipient.age",
-      "pgdump_format_args": "--no-owner --no-acl"
+      "pgdump_format_args": "--no-owner --clean --if-exists"
     },
     "collector": {"idpha_prom_file": "/srv/example/idpha.prom"},
     "host-check": {},
     "verify-ha": {"ha_verify_env": "/srv/example/verify.env"},
-    "rolling-maint": {}
+    "rolling-maint": {"maint_on_calendar": "Sun *-*-* 02:30:00 UTC"}
   }
 }
 PARAMS
