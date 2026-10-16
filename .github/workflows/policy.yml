@@ -86,7 +86,7 @@ jobs:
             echo "CANARY FAILED: the HA tests accepted a tag-only image pin."
             exit 1
           fi
-          grep -q 'image.pin is version tag plus digest' /tmp/out.txt || { echo "CANARY: red, but not for the pin reason"; cat /tmp/out.txt; exit 1; }
+          grep -q 'FAIL  image.pin shape' /tmp/out.txt || { echo "CANARY: red, but not for the pin reason"; cat /tmp/out.txt; exit 1; }
           echo "canary ok: dropping the digest turns the HA tests red"
 
   fixture-tamper-canary:
