@@ -11,12 +11,9 @@
 # DRY-RUN unless --apply / APPLY=1 (the systemd unit passes --apply). Dry-run
 # still performs the leader check, which is read-only.
 #
-# Values (private; see ha/idpha.env.example). Required:
-#   NODE_NAME OVERLAY_ADDR BACKUP_MC_ALIAS BACKUP_BUCKET BACKUP_PREFIX
-#   BACKUP_AGE_RECIPIENT_FILE   file holding the age recipient(s) (public)
-#   PGDUMP_FORMAT_ARGS          MUST match the single-host backup so the existing
-#                               validator needs no change; no default on purpose
-# Optional: KC_DB_NAME (keycloak) PG_DUMP_USER (postgres) PATRONI_PORT (8008)
+# Parameters: the typed params document (sections node, ha-backup). Required there: the store
+# alias, bucket, prefix, age recipient file and the dump flags (no default on purpose: they MUST
+# match the single-host backup so the existing validator needs no change). Optional: KC_DB_NAME (keycloak) PG_DUMP_USER (postgres) PATRONI_PORT (8008)
 #           MIN_CIPHERTEXT_BYTES (1024) IDPHA_STATE_DIR (/var/lib/idpha)
 # Object-store credentials arrive as MC_HOST_<alias> in the environment from the
 # unit's EnvironmentFile; they are never read from, or written to, this repo.
@@ -27,9 +24,8 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-idpha.sh"
 
 parse_common_flags "$@"
+idpha_begin ha-backup runtime
 mode_banner
-load_values
-require NODE_NAME OVERLAY_ADDR BACKUP_MC_ALIAS BACKUP_BUCKET BACKUP_PREFIX BACKUP_AGE_RECIPIENT_FILE PGDUMP_FORMAT_ARGS
 is_ipv4 "$OVERLAY_ADDR" || die "OVERLAY_ADDR is not an IPv4 address"
 [[ "$NODE_NAME" =~ ^[A-Za-z0-9-]+$ ]] || die "NODE_NAME has unexpected characters"
 [[ "$BACKUP_PREFIX" =~ ^[A-Za-z0-9/_-]+$ ]] || die "BACKUP_PREFIX has unexpected characters"
@@ -45,6 +41,8 @@ IDPHA_STATE_DIR="${IDPHA_STATE_DIR:-/var/lib/idpha}"
 # unreachable, mid-failover) means: not us, not now.
 if ! curl -sf --max-time 3 -o /dev/null "http://${OVERLAY_ADDR}:${PATRONI_PORT}/primary"; then
 	note "not leader, skip"
+	effect "$(_tab skip "not leader")"
+	idpha_end
 	exit 0
 fi
 okline "this node is the Patroni leader"
@@ -56,6 +54,8 @@ dest="${BACKUP_MC_ALIAS}/${BACKUP_BUCKET}/${key}"
 if ! is_apply; then
 	planline "pg_dump ($KC_DB_NAME, args from values) | age -R <recipient file> -> staged ciphertext"
 	planline "check ciphertext >= ${MIN_CIPHERTEXT_BYTES} bytes and age header, then mc cp -> ${BACKUP_BUCKET}/${key}"
+	effect "$(_tab upload "${BACKUP_BUCKET}/${BACKUP_PREFIX%/}/keycloak-${NODE_NAME}-<UTC>.sql.age")"
+	idpha_end
 	exit 0
 fi
 
@@ -77,3 +77,4 @@ mkdir -p "$IDPHA_STATE_DIR"
 date +%s >"$IDPHA_STATE_DIR/backup.last.tmp"
 mv "$IDPHA_STATE_DIR/backup.last.tmp" "$IDPHA_STATE_DIR/backup.last"
 echo "uploaded ${key} (${size} bytes)"
+idpha_end

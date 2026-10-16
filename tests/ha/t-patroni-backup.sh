@@ -100,18 +100,18 @@ newroot
 B="$REPO_ROOT/bin/ha-backup.sh"
 export IDPHA_STATE_DIR="$R/state"
 : >"$CALLS"
-PATH="$BSTUB:$PATH" STUB_LEADER=0 IDPHA_VALUES="$V" runit "$B" --apply
+PATH="$BSTUB:$PATH" STUB_LEADER=0 IDPHA_PARAMS="$V" runit "$B" --apply
 expect "replica exits 0" 0 "$RC"
 has "replica logs the skip" "$OUT" "not leader, skip"
 hasnt "replica never dumps" "$CALLS" "runuser"
 hasnt "replica never uploads" "$CALLS" "mc "
 : >"$CALLS"
-PATH="$BSTUB:$PATH" IDPHA_VALUES="$V" runit "$B"
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$V" runit "$B"
 expect "leader dry-run exits 0" 0 "$RC"
 hasnt "dry-run does not dump" "$CALLS" "runuser"
 hasnt "dry-run does not upload" "$CALLS" "mc "
 : >"$CALLS"
-PATH="$BSTUB:$PATH" IDPHA_VALUES="$V" runit "$B" --apply
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$V" runit "$B" --apply
 expect "leader apply exits 0" 0 "$RC"
 has "dump runs as the postgres user with the configured flags" "$CALLS" "runuser -u postgres -- pg_dump --no-owner --no-acl keycloak"
 has "encrypts to the recipient file" "$CALLS" "age -R $T/recipient.age"
@@ -120,17 +120,15 @@ has "prints the uploaded key" "$OUT" "uploaded ha/keycloak-node-1-"
 if [ -s "$R/state/backup.last" ]; then ok "success timestamp recorded for the collector"; else bad "no backup.last"; fi
 rm -f "$R/state/backup.last"
 : >"$CALLS"
-PATH="$BSTUB:$PATH" STUB_AGE=small IDPHA_VALUES="$V" runit "$B" --apply
+PATH="$BSTUB:$PATH" STUB_AGE=small IDPHA_PARAMS="$V" runit "$B" --apply
 expect "a truncated ciphertext is refused" 1 "$RC"
 hasnt "...and never uploaded" "$CALLS" "mc "
-PATH="$BSTUB:$PATH" STUB_AGE=nohdr IDPHA_VALUES="$V" runit "$B" --apply
+PATH="$BSTUB:$PATH" STUB_AGE=nohdr IDPHA_PARAMS="$V" runit "$B" --apply
 expect "output without the age header is refused" 1 "$RC"
 hasnt "...and never uploaded either" "$CALLS" "mc "
 if [ ! -e "$R/state/backup.last" ]; then ok "failure records no success timestamp"; else bad "success recorded for a failed backup"; fi
-mkvalues "$T/v-nofmt.env"
-grep -v PGDUMP_FORMAT_ARGS "$T/v-nofmt.env" >"$T/v-nofmt2.env"
-chmod 600 "$T/v-nofmt2.env"
-PATH="$BSTUB:$PATH" IDPHA_VALUES="$T/v-nofmt2.env" runit "$B" --apply
+mkvalues "$T/v-nofmt2.env" 'del(.operations["ha-backup"].pgdump_format_args)'
+PATH="$BSTUB:$PATH" IDPHA_PARAMS="$T/v-nofmt2.env" runit "$B" --apply
 expect "backup refuses without an explicit dump format (no silent default)" 1 "$RC"
 unset IDPHA_STATE_DIR
 

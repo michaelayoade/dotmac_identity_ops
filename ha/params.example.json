@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "node": {
+    "name": "node-1",
+    "overlay_addr": "192.0.2.1",
+    "vip_addr": "203.0.113.10",
+    "peers": [
+      {"overlay_addr": "192.0.2.2", "public_addr": "198.51.100.2"},
+      {"overlay_addr": "192.0.2.3", "public_addr": "198.51.100.3"}
+    ],
+    "ha_dir": "/srv/example/ha",
+    "patroni_conf": "/srv/example/patroni.yml",
+    "cert_files": [{"name": "idp", "path": "/srv/example/tls/idp/fullchain.pem"}]
+  },
+  "operations": {
+    "harden-ha": {"apt_upgrade_time": "01:15:00"},
+    "ha-install": {
+      "kc_hostname": "idp.example.test",
+      "links_hostname": "links.example.test",
+      "idp_cert_dir": "/srv/example/tls/idp",
+      "links_cert_dir": "/srv/example/tls/links",
+      "links_root": "/srv/example/links",
+      "gate_allow": ["198.51.100.77/32"],
+      "metrics_allow": ["198.51.100.79/32"],
+      "metrics_token_file": "/srv/example/metrics.token",
+      "backup_env_file": "/srv/example/backup.env"
+    },
+    "patroni-sync": {},
+    "ha-backup": {
+      "backup_mc_alias": "store",
+      "backup_bucket": "example-bucket",
+      "backup_prefix": "ha",
+      "backup_age_recipient_file": "/srv/example/recipient.age",
+      "pgdump_format_args": "--no-owner --no-acl"
+    },
+    "collector": {"idpha_prom_file": "/srv/example/node-exporter/idpha.prom"},
+    "host-check": {},
+    "verify-ha": {"ha_verify_env": "/srv/example/verify.env", "verify_extra_realms": ["ops"]},
+    "rolling-maint": {}
+  }
+}

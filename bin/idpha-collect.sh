@@ -9,10 +9,8 @@
 #
 # Without --apply it prints the exposition to stdout and writes no file.
 #
-# Values (private): NODE_NAME OVERLAY_ADDR VIP_ADDR PRIMARY_NIC(eth0) WG_IF(wg0)
-#   CERT_FILES   space-separated name=path pairs, e.g. idp=/etc/ssl/idp/fullchain.pem
-#   KC_CLUSTER_SIZE_METRIC  Keycloak metric carrying the Infinispan view size
-#                           (TO CONFIRM on 26.0.8 in packet H5.0; unset = not emitted)
+# Parameters: the typed params document (sections node, collector; cert_files and vip_addr
+# on the node). KC_CLUSTER_SIZE_METRIC is optional until the metric name is confirmed.
 # Knobs: IDPHA_PROM_FILE (/var/lib/prometheus/node-exporter/idpha.prom)
 #        IDPHA_STATE_DIR (/var/lib/idpha)  SLOW_TTL_S (600)
 
@@ -22,7 +20,7 @@ LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LIB_DIR/lib-idpha.sh"
 
 parse_common_flags "$@"
-load_values
+idpha_begin collector runtime
 require NODE_NAME OVERLAY_ADDR
 PRIMARY_NIC="${PRIMARY_NIC:-eth0}"
 WG_IF="${WG_IF:-wg0}"
@@ -170,4 +168,6 @@ if is_apply; then
 	mv "$IDPHA_PROM_FILE.tmp" "$IDPHA_PROM_FILE"
 else
 	cat "$out"
+	effect "$(_tab write "$IDPHA_PROM_FILE" 644 - 0)"
 fi
+idpha_end

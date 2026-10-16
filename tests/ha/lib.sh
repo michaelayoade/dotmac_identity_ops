@@ -67,35 +67,63 @@ chmod +x "$STUB/systemctl"
 } >"$STUB/nginx"
 chmod +x "$STUB/nginx"
 export PATH="$STUB:$PATH"
-export IDPHA_ALLOW_UNSAFE_VALUES=1 # test values files are owned by the test user
+export IDPHA_ALLOW_UNSAFE_VALUES=1 # token/credential reference files in tests are owned by the test user
+export IDPHA_ALLOW_UNBOUND_APPLY=1 # most tests apply directly; t-params.sh covers the digest binding
 
-mkvalues() { # mkvalues <file> [extra assignment lines...]
-	cat >"$1" <<VALUES
-NODE_NAME=node-1
-OVERLAY_ADDR=192.0.2.1
-PEER_OVERLAY_1=192.0.2.2
-PEER_OVERLAY_2=192.0.2.3
-PEER_PUBLIC_1=198.51.100.2
-PEER_PUBLIC_2=198.51.100.3
-VIP_ADDR=203.0.113.10
-HA_DIR=/srv/example/ha
-BACKUP_ENV_FILE=/srv/example/backup.env
-METRICS_TOKEN_FILE=$T/metrics.token
-APT_UPGRADE_TIME=01:15:00
-LINKS_ROOT=/srv/example/links
-GATE_ALLOW="198.51.100.77/32 198.51.100.78/32"
-METRICS_ALLOW="198.51.100.79/32"
-BACKUP_MC_ALIAS=store
-BACKUP_BUCKET=example-bucket
-BACKUP_PREFIX=ha
-BACKUP_AGE_RECIPIENT_FILE=$T/recipient.age
-PGDUMP_FORMAT_ARGS="--no-owner --no-acl"
-VALUES
-	if [ $# -ge 2 ]; then printf '%s\n' "${@:2}" >>"$1"; fi
+# mkvalues <file> [jq filter...]: write a VALID params document (documentation
+# ranges only), then apply each jq filter to make a variant.
+mkvalues() {
+	cat >"$1" <<PARAMS
+{
+  "schema_version": 1,
+  "node": {
+    "name": "node-1",
+    "overlay_addr": "192.0.2.1",
+    "vip_addr": "203.0.113.10",
+    "peers": [
+      {"overlay_addr": "192.0.2.2", "public_addr": "198.51.100.2"},
+      {"overlay_addr": "192.0.2.3", "public_addr": "198.51.100.3"}
+    ],
+    "ha_dir": "/srv/example/ha",
+    "patroni_conf": "/srv/example/patroni.yml"
+  },
+  "operations": {
+    "harden-ha": {"apt_upgrade_time": "01:15:00"},
+    "ha-install": {
+      "kc_hostname": "idp.example.test",
+      "links_hostname": "links.example.test",
+      "idp_cert_dir": "/srv/example/tls/idp",
+      "links_cert_dir": "/srv/example/tls/links",
+      "links_root": "/srv/example/links",
+      "gate_allow": ["198.51.100.77/32", "198.51.100.78/32"],
+      "metrics_allow": ["198.51.100.79/32"],
+      "metrics_token_file": "$T/metrics.token",
+      "backup_env_file": "/srv/example/backup.env"
+    },
+    "patroni-sync": {},
+    "ha-backup": {
+      "backup_mc_alias": "store",
+      "backup_bucket": "example-bucket",
+      "backup_prefix": "ha",
+      "backup_age_recipient_file": "$T/recipient.age",
+      "pgdump_format_args": "--no-owner --no-acl"
+    },
+    "collector": {"idpha_prom_file": "/srv/example/idpha.prom"},
+    "host-check": {},
+    "verify-ha": {"ha_verify_env": "/srv/example/verify.env"},
+    "rolling-maint": {}
+  }
+}
+PARAMS
+	local f
+	for f in "${@:2}"; do
+		jq "$f" "$1" >"$1.new" && mv "$1.new" "$1"
+	done
 	chmod 600 "$1"
 }
 V="$T/values.env"
 mkvalues "$V"
+export IDPHA_PARAMS="$V" # default params document; tests override per command
 newroot() {
 	R="$T/root.$RANDOM"
 	mkdir -p "$R"

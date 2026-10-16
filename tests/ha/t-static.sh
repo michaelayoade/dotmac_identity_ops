@@ -22,7 +22,7 @@ done
 if [ -z "$missing" ]; then ok "every metric an alert uses is produced by the collector"; else bad "alerts reference metrics the collector does not emit:$missing"; fi
 if python3 -c 'import yaml' 2>/dev/null; then
 	if python3 -c 'import sys,yaml; d=yaml.safe_load(open(sys.argv[1])); assert all("expr" in r for g in d["groups"] for r in g["rules"])' "$RULES"; then ok "rules file parses as YAML"; else bad "rules file is not valid YAML"; fi
-	if python3 -c 'import sys,yaml; yaml.safe_load(open(sys.argv[1]).read().replace("@@HA_NODE_TARGETS@@","        - x"))' "$REPO_ROOT/ha/prometheus/scrape.yml.tmpl" 2>/dev/null; then ok "scrape template parses once tokens are filled"; else bad "scrape template does not parse"; fi
+	if python3 -c 'import sys,yaml; yaml.safe_load(__import__("re").sub("@@[A-Z_]+@@","x",open(sys.argv[1]).read()))' "$REPO_ROOT/ha/prometheus/scrape.yml.tmpl" 2>/dev/null; then ok "scrape template parses once tokens are filled"; else bad "scrape template does not parse"; fi
 else
 	echo "skip  YAML parse (PyYAML not installed); the structural checks above still ran"
 fi

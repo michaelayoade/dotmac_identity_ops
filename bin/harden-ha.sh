@@ -4,7 +4,7 @@
 # Run as root ON the node, one node at a time, replica first, never during an
 # apt-daily-upgrade window. DRY-RUN unless APPLY=1 / --apply.
 #
-#   harden-ha.sh plan                     show everything (always dry)
+#   harden-ha.sh preview                  show everything (always dry)
 #   harden-ha.sh ufw                      firewall behind a 10 minute dead-man timer
 #   harden-ha.sh ufw-confirm --fresh-login-confirmed
 #                                         cancel the dead-man timer
@@ -13,11 +13,9 @@
 #   harden-ha.sh wait-online              (optional) scope networkd wait-online to the NIC
 #   harden-ha.sh rollback <ufw|dropins|upgrade-policy|wait-online>
 #
-# Values (private, never in Git): see ha/idpha.env.example. Required here:
-#   PEER_PUBLIC_1 PEER_PUBLIC_2  the two peers' public addresses (wg transport)
-#   APT_UPGRADE_TIME             HH:MM:SS UTC, distinct per node
-# Optional: SSH_PORT (22) WG_IF (wg0) WG_PORT (51820) WG_UNIT (wg-quick@wg0.service)
-#           PRIMARY_NIC (eth0) DEADMAN_MINUTES (10)
+# Parameters: the typed params document (--params FILE|-, see ha/params.schema.json),
+# sections `node` and `operations.harden-ha`. Preview the effect with --plan (JSON +
+# digest); --apply needs --expect-digest <that digest> and re-plans first.
 #
 # It does NOT touch sshd settings (fleet-access S6 owns those) and never
 # restarts patroni, etcd, haproxy or nginx.
@@ -33,14 +31,14 @@ UFW_BIN="${UFW_BIN:-/usr/sbin/ufw}"
 
 parse_common_flags "$@"
 set -- ${REST_ARGS[@]+"${REST_ARGS[@]}"}
-cmd="${1:-plan}"
+cmd="${1:-preview}"
 shift || true
 
-if [ "$cmd" = "plan" ]; then APPLY=0; fi
+if [ "$cmd" = "preview" ]; then APPLY=0; fi
 if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "APPLY needs root"; fi
 
+idpha_begin harden-ha
 mode_banner
-load_values
 
 do_ufw() {
 	require PEER_PUBLIC_1 PEER_PUBLIC_2
@@ -156,7 +154,7 @@ do_rollback() {
 }
 
 case "$cmd" in
-	plan)
+	preview)
 		do_ufw
 		do_dropins
 		do_upgrade_policy
@@ -169,3 +167,4 @@ case "$cmd" in
 	rollback) do_rollback "${1:-}" ;;
 	*) die "unknown command '$cmd' (see header)" ;;
 esac
+idpha_end

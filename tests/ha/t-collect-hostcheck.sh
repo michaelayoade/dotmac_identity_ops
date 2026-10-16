@@ -38,9 +38,11 @@ printf '#!/usr/bin/env bash\nexit 0\n' >"$CSTUB/systemctl"
 chmod +x "$CSTUB"/*
 newroot
 CV="$T/cvalues.env"
-mkvalues "$CV" "CERT_FILES=\"idp=$T/nonexistent.pem\""
+mkvalues "$CV" '.node.cert_files=[{"name":"idp","path":"/nonexistent/x.pem"}]'
 C="$REPO_ROOT/bin/idpha-collect.sh"
-PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state" IDPHA_VALUES="$CV" runit "$C"
+mkvalues "$T/cvp.json" ".operations.collector.idpha_prom_file=\"$R/prom/idpha.prom\""
+CVP="$T/cvp.json"
+PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state" IDPHA_PARAMS="$CV" runit "$C"
 expect "collector prints and exits 0" 0 "$RC"
 has "leader detected" "$OUT" 'idpha_patroni_is_leader{node="node-1"} 1'
 has "timeline read" "$OUT" 'idpha_patroni_timeline{node="node-1"} 7'
@@ -54,16 +56,16 @@ has "needrestart pending counted" "$OUT" 'idpha_needrestart_pending{node="node-1
 has "wg handshake age per peer" "$OUT" 'idpha_wg_handshake_age_seconds{node="node-1",peer="1"} '
 has "collector reports which checks it could take" "$OUT" 'idpha_collect_check_ok{check="patroni"} 1'
 hasnt "no cluster-size sample without a confirmed metric name" "$OUT" 'idpha_keycloak_cluster_size{'
-PATH="$CSTUB:$PATH" STUB_KC=0 IDPHA_STATE_DIR="$R/state2" IDPHA_VALUES="$CV" runit "$C"
+PATH="$CSTUB:$PATH" STUB_KC=0 IDPHA_STATE_DIR="$R/state2" IDPHA_PARAMS="$CV" runit "$C"
 has "keycloak down is reported as 0" "$OUT" 'idpha_keycloak_ready{node="node-1"} 0'
-PATH="$CSTUB:$PATH" IDPHA_PROM_FILE="$R/prom/idpha.prom" IDPHA_STATE_DIR="$R/state3" IDPHA_VALUES="$CV" runit "$C"
+PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state3" IDPHA_PARAMS="$CVP" runit "$C"
 if [ ! -e "$R/prom/idpha.prom" ]; then ok "dry-run writes no textfile"; else bad "dry-run wrote the textfile"; fi
-PATH="$CSTUB:$PATH" IDPHA_PROM_FILE="$R/prom/idpha.prom" IDPHA_STATE_DIR="$R/state3" IDPHA_VALUES="$CV" runit "$C" --apply
+PATH="$CSTUB:$PATH" IDPHA_STATE_DIR="$R/state3" IDPHA_PARAMS="$CVP" runit "$C" --apply
 if [ -s "$R/prom/idpha.prom" ] && [ ! -e "$R/prom/idpha.prom.tmp" ]; then ok "apply writes the textfile atomically"; else bad "textfile missing or tmp left"; fi
 NOETCD="$T/noetcd"
 mkdir -p "$NOETCD"
 for f in "$CSTUB"/*; do [ "$(basename "$f")" = etcdctl ] || cp "$f" "$NOETCD/"; done
-PATH="$NOETCD:$PATH" IDPHA_STATE_DIR="$R/state4" IDPHA_VALUES="$CV" runit "$C"
+PATH="$NOETCD:$PATH" IDPHA_STATE_DIR="$R/state4" IDPHA_PARAMS="$CV" runit "$C"
 has "a missing etcdctl is 'could not look' (check_ok 0)" "$OUT" 'idpha_collect_check_ok{check="etcd"} 0'
 hasnt "...and not a false 'unhealthy' sample" "$OUT" 'idpha_etcd_members_healthy{'
 
@@ -128,31 +130,31 @@ printf '[Timer]\nOnCalendar=\nOnCalendar=*-*-* 01:15:00 UTC\nRandomizedDelaySec=
 : >"$R/etc/ssh/sshd_config.d/00-dotmac-hardening.conf"
 printf 'geo $idp_gate {\n    default 0;\n}\n' >"$R/etc/nginx/snippets/idpha-gate.conf"
 pin="$(sed -n 's/^KC_IMAGE_REF=//p' "$REPO_ROOT/ha/image.pin")"
-printf 'services:\n  keycloak:\n    image: %s\n    environment:\n      KC_HOSTNAME: "https://idp.dotmac.io"\n      KC_HOSTNAME_STRICT: "true"\n      KC_HTTP_HOST: "127.0.0.1"\n' "$pin" >"$R/srv/example/ha/compose.yml"
+printf 'services:\n  keycloak:\n    image: %s\n    environment:\n      KC_HOSTNAME: "https://idp.example.test"\n      KC_HOSTNAME_STRICT: "true"\n      KC_HTTP_HOST: "127.0.0.1"\n' "$pin" >"$R/srv/example/ha/compose.yml"
 chmod 600 "$R/srv/example/ha/compose.yml"
 HC="$REPO_ROOT/bin/host-check.sh"
-PATH="$HSTUB:$PATH" IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
+PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
 expect "a conforming node passes" 0 "$RC"
 has "JSON reports zero fails" "$OUT" '"fails":0'
 has "port 57800 is reported as contained by ufw, not passed silently" "$OUT" 'contained only by ufw'
-PATH="$HSTUB:$PATH" HC_UFW=off IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
+PATH="$HSTUB:$PATH" HC_UFW=off IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
 expect "fails when ufw is inactive" 1 "$RC"
 has "...and names the check" "$OUT" '"name":"ufw.active","status":"FAIL"'
-PATH="$HSTUB:$PATH" HC_8080=wild IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
+PATH="$HSTUB:$PATH" HC_8080=wild IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
 expect "fails when Keycloak HTTP is wildcard-bound" 1 "$RC"
-PATH="$HSTUB:$PATH" IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate open
+PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate open
 expect "fails when the gate is not in the state the phase expects" 1 "$RC"
-PATH="$HSTUB:$PATH" HC_8080=wild IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase pre-keycloak --gate closed
+PATH="$HSTUB:$PATH" HC_8080=wild IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase pre-keycloak --gate closed
 has "pre-keycloak phase SKIPs (not passes) the 8080 check" "$OUT" '"name":"listener.8080","status":"SKIP"'
-PATH="$HSTUB:$PATH" IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase nonsense
+PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase nonsense
 expect "an unknown phase is refused" 1 "$RC"
 sed 's/KC_HTTP_HOST: "127.0.0.1"/KC_HTTP_HOST: "0.0.0.0"/' "$R/srv/example/ha/compose.yml" >"$R/c.new"
 mv "$R/c.new" "$R/srv/example/ha/compose.yml"
 chmod 600 "$R/srv/example/ha/compose.yml"
-PATH="$HSTUB:$PATH" IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
+PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
 expect "fails a compose file that is not loopback-only" 1 "$RC"
 rm -f "$R/etc/systemd/system/keepalived.service.d/10-after-wireguard.conf"
-PATH="$HSTUB:$PATH" IDPHA_VALUES="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
+PATH="$HSTUB:$PATH" IDPHA_PARAMS="$V" IDPHA_ROOT="$R" runit "$HC" --phase running --gate closed
 has "a missing boot-ordering drop-in is a FAIL" "$OUT" '"name":"dropin.keepalived","status":"FAIL"'
 
 finish "t-collect-hostcheck"

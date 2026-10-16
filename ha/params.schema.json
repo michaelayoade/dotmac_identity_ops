@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dotmac-idp-ha-params-v1",
+  "title": "IdP HA node parameters",
+  "description": "The ONE typed document every ha operation consumes. Composed and entered at ship time (governed-operation parameters); never committed with real values. It carries no secret: credentials are named by REFERENCE only (a root-600 file on the host, resolved on the host). Topology fields have no defaults. Each operation has its own section under 'operations'; a script requires its own section (an explicit empty object where it has no required values) and ignores the others.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "node", "operations"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "node": {"$ref": "#/$defs/node"},
+    "operations": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "harden-ha": {"$ref": "#/$defs/hardenHa"},
+        "ha-install": {"$ref": "#/$defs/haInstall"},
+        "patroni-sync": {"$ref": "#/$defs/patroniSync"},
+        "ha-backup": {"$ref": "#/$defs/haBackup"},
+        "collector": {"$ref": "#/$defs/collector"},
+        "host-check": {"$ref": "#/$defs/hostCheck"},
+        "verify-ha": {"$ref": "#/$defs/verifyHa"},
+        "rolling-maint": {"$ref": "#/$defs/rollingMaint"}
+      }
+    }
+  },
+  "$defs": {
+    "node": {
+      "description": "The node this run targets, and its two peers. One node per run.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "overlay_addr", "peers", "ha_dir"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,62}$"},
+        "overlay_addr": {"type": "string", "format": "ipv4"},
+        "vip_addr": {"type": "string", "format": "ipv4"},
+        "peers": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["overlay_addr", "public_addr"],
+            "properties": {
+              "overlay_addr": {"type": "string", "format": "ipv4"},
+              "public_addr": {"type": "string", "format": "ipv4"}
+            }
+          }
+        },
+        "ha_dir": {"type": "string", "format": "abs-path"},
+        "patroni_conf": {"type": "string", "format": "abs-path"},
+        "cert_files": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["name", "path"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,32}$"},
+              "path": {"type": "string", "format": "abs-path"}
+            }
+          }
+        },
+        "wg_if": {"type": "string", "pattern": "^[a-z][a-z0-9]{0,14}$"},
+        "wg_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "wg_unit": {"type": "string", "pattern": "^[A-Za-z0-9@._-]+\\.service$"},
+        "primary_nic": {"type": "string", "pattern": "^[a-z][a-z0-9]{0,14}$"},
+        "ssh_port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "hardenHa": {
+      "type": "object", "additionalProperties": false, "required": ["apt_upgrade_time"],
+      "properties": {
+        "apt_upgrade_time": {"type": "string", "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"},
+        "deadman_minutes": {"type": "integer", "minimum": 1, "maximum": 60}
+      }
+    },
+    "haInstall": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kc_hostname", "links_hostname", "idp_cert_dir", "links_cert_dir", "links_root", "gate_allow", "metrics_allow"],
+      "properties": {
+        "kc_hostname": {"type": "string", "format": "hostname"},
+        "links_hostname": {"type": "string", "format": "hostname"},
+        "idp_cert_dir": {"type": "string", "format": "abs-path"},
+        "links_cert_dir": {"type": "string", "format": "abs-path"},
+        "links_root": {"type": "string", "format": "abs-path"},
+        "gate_allow": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "cidr4"}},
+        "metrics_allow": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "cidr4"}},
+        "metrics_token_file": {"description": "REFERENCE: root-600 file on the host holding the bearer value", "type": "string", "format": "abs-path"},
+        "backup_env_file": {"description": "REFERENCE: root-600 file on the host carrying the write-only store identity", "type": "string", "format": "abs-path"}
+      }
+    },
+    "patroniSync": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"sync_wait_s": {"type": "integer", "minimum": 3, "maximum": 600}}
+    },
+    "haBackup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backup_mc_alias", "backup_bucket", "backup_prefix", "backup_age_recipient_file", "pgdump_format_args"],
+      "properties": {
+        "backup_mc_alias": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
+        "backup_bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,62}$"},
+        "backup_prefix": {"type": "string", "pattern": "^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$"},
+        "backup_age_recipient_file": {"description": "REFERENCE: file with the public age recipient(s)", "type": "string", "format": "abs-path"},
+        "pgdump_format_args": {"description": "Must equal the single-host backup's flags so the validator needs no change", "type": "string", "pattern": "^(--?[a-z][a-z0-9-]*(=[A-Za-z0-9_.-]+)?)( --?[a-z][a-z0-9-]*(=[A-Za-z0-9_.-]+)?)*$"},
+        "kc_db_name": {"type": "string", "pattern": "^[a-z_][a-z0-9_]{0,62}$"},
+        "pg_dump_user": {"type": "string", "pattern": "^[a-z_][a-z0-9_]{0,31}$"},
+        "patroni_port": {"type": "integer", "minimum": 1, "maximum": 65535},
+        "min_ciphertext_bytes": {"type": "integer", "minimum": 64},
+        "idpha_state_dir": {"type": "string", "format": "abs-path"}
+      }
+    },
+    "collector": {
+      "type": "object", "additionalProperties": false, "required": ["idpha_prom_file"],
+      "properties": {
+        "idpha_prom_file": {"type": "string", "format": "abs-path"},
+        "kc_cluster_size_metric": {"type": "string", "pattern": "^[a-zA-Z_:][a-zA-Z0-9_:]*$"},
+        "slow_ttl_s": {"type": "integer", "minimum": 30},
+        "idpha_state_dir": {"type": "string", "format": "abs-path"},
+        "patroni_port": {"type": "integer", "minimum": 1, "maximum": 65535}
+      }
+    },
+    "hostCheck": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "provider_cred_file": {"description": "REFERENCE: provider credential file whose permissions are checked", "type": "string", "format": "abs-path"},
+        "cache_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "cert_min_days": {"type": "integer", "minimum": 1, "maximum": 365}
+      }
+    },
+    "verifyHa": {
+      "type": "object", "additionalProperties": false, "required": ["ha_verify_env"],
+      "properties": {
+        "ha_verify_env": {"description": "REFERENCE: root-600 file defining the verifier client id and secret", "type": "string", "format": "abs-path"},
+        "verify_extra_realms": {"type": "array", "items": {"type": "string", "pattern": "^[a-z0-9_-]{1,64}$"}}
+      }
+    },
+    "rollingMaint": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "restart_allowlist": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["patroni", "haproxy", "nginx", "keepalived", "etcd", "fail2ban"]}},
+        "health_wait_s": {"type": "integer", "minimum": 5, "maximum": 1800}
+      }
+    }
+  }
+}

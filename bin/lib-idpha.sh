@@ -5,17 +5,22 @@
 # Conventions every HA script follows (AGENTS.md § 1, § 10):
 #   * DRY-RUN by default. Nothing changes unless APPLY=1 (or --apply).
 #   * Environment-specific values (addresses, peers, buckets, allowlists) are
-#     NEVER in this repository. They come from a root-owned values file, named
-#     by IDPHA_VALUES (default /etc/idpha/idpha.env). Its contents are the
-#     operator's private runbook; this repo documents only the variable NAMES
-#     (ha/idpha.env.example).
+#     NEVER in this repository and are NOT hand-authored files. They arrive as
+#     ONE typed params document (--params <file|-> or IDPHA_PARAMS), validated
+#     against ha/params.schema.json before anything runs. The document carries
+#     no secret: credentials are named by reference (a root-600 file on the host).
+#   * --plan prints the effect summary as JSON with a digest; --apply must carry
+#     --expect-digest <digest>, re-plans, and refuses if the digest differs, so
+#     an approval binds exactly what was previewed.
 #   * Every file replaced is first copied to IDPHA_BACKUP_DIR so rollback is a
 #     copy back, never a guess.
 #   * No secret value is ever printed. put_file prints a hash, not content.
 #
 # Bash 3.2 compatible on purpose (tests also run on a workstation shell).
 
-IDPHA_VALUES="${IDPHA_VALUES:-/etc/idpha/idpha.env}"
+IDPHA_PARAMS="${IDPHA_PARAMS:-}"
+IDPHA_EXPECT_DIGEST="${IDPHA_EXPECT_DIGEST:-}"
+PLAN_JSON=0
 IDPHA_BACKUP_DIR="${IDPHA_BACKUP_DIR:-/var/lib/idpha/backup}"
 IDPHA_ROOT="${IDPHA_ROOT:-}" # test hook: prefix for every host path written
 # One stamp per run: every file replaced in this run lands under one backup dir,
@@ -31,11 +36,26 @@ die() {
 note() { printf '%s\n' "$*"; }
 okline() { printf 'ok    %s\n' "$*"; }
 planline() { printf 'PLAN  %s\n' "$*"; }
+_IDPHA_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+IDPHA_SCHEMA="${IDPHA_SCHEMA:-$_IDPHA_LIB_DIR/../ha/params.schema.json}"
+IDPHA_EFFECTS=""
+
+# effect <tab-separated record>: remember what a plan WOULD change. The records
+# feed the --plan JSON and its digest; they hold paths, modes, content hashes
+# and command lines — never content.
+effect() {
+	[ -n "$IDPHA_EFFECTS" ] || return 0
+	printf '%s\n' "$*" | tr '\n' ' ' >>"$IDPHA_EFFECTS"
+	printf '\n' >>"$IDPHA_EFFECTS"
+}
+_tab() { local IFS=$'\t'; printf '%s' "$*"; }
 
 is_apply() { [ "$APPLY" = "1" ]; }
 
 mode_banner() {
-	if is_apply; then
+	if [ "$PLAN_JSON" = 1 ]; then
+		note "== PLAN (JSON effect summary on stdout) =="
+	elif is_apply; then
 		note "== APPLY mode =="
 	else
 		note "== DRY-RUN (nothing changes; set APPLY=1 or pass --apply) =="
@@ -47,29 +67,11 @@ file_mode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
 # file_owner <path> -> numeric uid
 file_owner() { stat -c '%u' "$1" 2>/dev/null || stat -f '%u' "$1"; }
 
-# load_values: source the private values file, exported. Refuses a values file
-# that is group/world accessible or not owned by root (unless the test hook
-# IDPHA_ALLOW_UNSAFE_VALUES=1), because it is executed as shell.
-load_values() {
-	[ -r "$IDPHA_VALUES" ] || die "values file '$IDPHA_VALUES' is not readable. It holds the node's private values; the operator private runbook records where it comes from. This repository never carries them."
-	local m o
-	m="$(file_mode "$IDPHA_VALUES")"
-	o="$(file_owner "$IDPHA_VALUES")"
-	if [ "${IDPHA_ALLOW_UNSAFE_VALUES:-0}" != "1" ]; then
-		[ "$o" = "0" ] || die "values file is not owned by root (uid $o)"
-		case "$m" in 600 | 400) ;; *) die "values file mode is $m; require 600" ;; esac
-	fi
-	set -a
-	# shellcheck disable=SC1090
-	. "$IDPHA_VALUES"
-	set +a
-}
-
 # require VAR... : every named variable must be set and non-empty.
 require() {
 	local v
 	for v in "$@"; do
-		[ -n "${!v:-}" ] || die "required value $v is unset or empty in $IDPHA_VALUES"
+		[ -n "${!v:-}" ] || die "required value $v is unset or empty in the params document"
 	done
 }
 
@@ -142,6 +144,7 @@ put_file() {
 	fi
 	if ! is_apply; then
 		planline "write $dest mode $mode sha256 ${newsum:0:12} ($([ -n "$oldsum" ] && echo replaces || echo new))"
+		effect "$(_tab write "$dest" "$mode" "$newsum" "$([ -n "$oldsum" ] && echo 1 || echo 0)")"
 		rm -f "$tmp"
 		return 0
 	fi
@@ -171,6 +174,7 @@ remove_file() {
 	}
 	if ! is_apply; then
 		planline "remove $dest"
+		effect "$(_tab remove "$dest")"
 		return 0
 	fi
 	local bdir
@@ -189,20 +193,90 @@ run() {
 		"$@"
 	else
 		planline "$*"
+		effect "$(_tab run "$*")"
 	fi
 }
 
+# parse_common_flags "$@": consumes the flags every HA script shares and leaves
+# the rest in REST_ARGS. CHILD_ARGS is the same command line minus the mode
+# flags, used to re-plan before an apply.
+#   --plan                 dry-run, effect summary as JSON on stdout (human text -> stderr)
+#   --dry-run              dry-run, human text (the default)
+#   --apply                change things; needs --expect-digest (see idpha_begin)
+#   --expect-digest D      the digest of the previewed effect the approval bound
+#   --params FILE|-        the typed params document (or IDPHA_PARAMS)
 parse_common_flags() {
-	# Consumes --apply / --dry-run; leaves the rest in REST_ARGS (array).
 	REST_ARGS=()
-	local a
+	CHILD_ARGS=()
+	local a want=""
 	for a in "$@"; do
+		if [ -n "$want" ]; then
+			case "$want" in
+				params)
+					if [ "$a" = "-" ]; then
+						IDPHA_PARAMS="$(mktemp)"
+						cat >"$IDPHA_PARAMS"
+						_IDPHA_TMP_PARAMS="$IDPHA_PARAMS"
+					else
+						IDPHA_PARAMS="$a"
+					fi
+					CHILD_ARGS+=(--params "$IDPHA_PARAMS")
+					;;
+				digest) IDPHA_EXPECT_DIGEST="$a" ;;
+			esac
+			want=""
+			continue
+		fi
 		case "$a" in
 			--apply) APPLY=1 ;;
 			--dry-run) APPLY=0 ;;
-			*) REST_ARGS+=("$a") ;;
+			--plan)
+				APPLY=0
+				PLAN_JSON=1
+				;;
+			--params) want=params ;;
+			--expect-digest) want=digest ;;
+			*)
+				REST_ARGS+=("$a")
+				CHILD_ARGS+=("$a")
+				;;
 		esac
 	done
+	[ -z "$want" ] || die "flag --${want/digest/expect-digest} needs a value"
+}
+
+# idpha_begin <operation> [runtime]: load and VALIDATE the params document
+# (refusing on anything missing or invalid), export the operation's values, and
+# for a state-changing apply insist on the approved digest.
+#   runtime  jobs run by a timer (backup, collector) and read-only checks cannot
+#            carry a per-run approval; they never take --expect-digest.
+idpha_begin() {
+	IDPHA_OP="$1"
+	local kind="${2:-}" tool="$_IDPHA_LIB_DIR/idpha-params.py" exports
+	IDPHA_EFFECTS="$(mktemp)"
+	[ -n "$IDPHA_PARAMS" ] || die "no params document: pass --params <file|-> or set IDPHA_PARAMS"
+	[ -r "$IDPHA_PARAMS" ] || die "params document is not readable"
+	exports="$(python3 -I "$tool" export --schema "$IDPHA_SCHEMA" --params "$IDPHA_PARAMS" --op "$IDPHA_OP")" || exit 1
+	eval "$exports"
+	if [ "$PLAN_JSON" = 1 ]; then exec 4>&1 1>&2; fi
+	if is_apply && [ "$kind" != runtime ] && [ -z "${IDPHA_CHILD:-}" ]; then
+		if [ -n "$IDPHA_EXPECT_DIGEST" ]; then
+			local got
+			got="$(IDPHA_CHILD=1 IDPHA_PARAMS="$IDPHA_PARAMS" bash "$0" ${CHILD_ARGS[@]+"${CHILD_ARGS[@]}"} --plan 2>/dev/null | python3 -I "$tool" digest-of)" || die "re-plan before apply failed"
+			[ "$got" = "$IDPHA_EXPECT_DIGEST" ] || die "plan digest differs from the approved one (approved $IDPHA_EXPECT_DIGEST, now $got): re-plan and re-approve"
+			okline "re-plan matches the approved digest"
+		elif [ "${IDPHA_ALLOW_UNBOUND_APPLY:-0}" != 1 ]; then
+			die "--apply needs --expect-digest <digest printed by --plan>: an approval binds the previewed effect"
+		fi
+	fi
+}
+
+# idpha_end: print the --plan JSON (effects + digest). Call as the last step.
+idpha_end() {
+	if [ "$PLAN_JSON" = 1 ]; then
+		python3 -I "$_IDPHA_LIB_DIR/idpha-params.py" plan-doc --op "$IDPHA_OP" --node "${NODE_NAME:-unknown}" --effects "$IDPHA_EFFECTS" >&4
+	fi
+	rm -f "$IDPHA_EFFECTS" "${_IDPHA_TMP_PARAMS:-}"
 }
 
 # ---- shared expectations (used by harden-ha.sh AND host-check.sh so the
@@ -266,6 +340,7 @@ restore_run() {
 			okline "restored $rel"
 		else
 			planline "restore $rel"
+			effect "$(_tab restore "$rel")"
 		fi
 	done < <(find "$bdir" -type f ! -name .created)
 	if [ -f "$bdir/.created" ]; then
@@ -275,6 +350,7 @@ restore_run() {
 				okline "removed $rel (created by run $stamp)"
 			else
 				planline "remove $rel (created by run $stamp)"
+				effect "$(_tab remove "$rel")"
 			fi
 		done <"$bdir/.created"
 	fi

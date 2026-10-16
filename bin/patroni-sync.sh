@@ -12,7 +12,9 @@
 # allowlist. Changing replication mode on a cluster that is already degraded
 # hides the degradation behind a stalled commit.
 #
-# Knobs: PATRONICTL (patronictl) PATRONI_CONF (/etc/patroni/config.yml)
+# Parameters: the typed params document (node.patroni_conf, operations.patroni-sync);
+#        --plan prints the effect + digest, --apply needs --expect-digest.
+# Knobs: PATRONICTL (patronictl)
 #        PATCH_FILE (ha/patroni/dcs-sync.yml) SYNC_WAIT_S (45)
 
 set -euo pipefail
@@ -22,7 +24,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$LIB_DIR/.." && pwd)}"
 . "$LIB_DIR/lib-idpha.sh"
 
 PATRONICTL="${PATRONICTL:-patronictl}"
-PATRONI_CONF="${PATRONI_CONF:-/etc/patroni/config.yml}"
+PATRONI_CONF="${PATRONI_CONF:-}"
 PATCH_FILE="${PATCH_FILE:-$REPO_ROOT/ha/patroni/dcs-sync.yml}"
 SYNC_WAIT_S="${SYNC_WAIT_S:-45}"
 ALLOWED_KEYS="synchronous_mode synchronous_mode_strict synchronous_node_count"
@@ -31,7 +33,9 @@ parse_common_flags "$@"
 set -- ${REST_ARGS[@]+"${REST_ARGS[@]}"}
 cmd="${1:-show}"
 [ "$cmd" = "show" ] && APPLY=0
+idpha_begin patroni-sync
 mode_banner
+require PATRONI_CONF
 
 pctl() { "$PATRONICTL" -c "$PATRONI_CONF" "$@"; }
 
@@ -144,3 +148,4 @@ case "$cmd" in
 	rollback) do_rollback ;;
 	*) die "unknown command '$cmd'" ;;
 esac
+idpha_end

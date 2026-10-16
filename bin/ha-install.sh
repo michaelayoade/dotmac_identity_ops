@@ -13,7 +13,9 @@
 #   ha-install.sh timer-enable backup|collector   enable --now the timer (H3.5 / H4.1)
 #   ha-install.sh rollback <stamp>   restore one run's backups, nginx -t, reload
 #
-# Values (private): ha/idpha.env.example lists every name. Secrets: the database
+# Parameters: the typed params document (--params FILE|-, ha/params.schema.json), sections
+# `node` and `operations.ha-install`; --plan prints the effect + digest and --apply needs
+# --expect-digest. Secrets are REFERENCES: the database
 # password line is COPIED from the node's existing compose file, never read into
 # output; the metrics bearer comes from a root-600 file (METRICS_TOKEN_FILE).
 #
@@ -39,19 +41,16 @@ shift || true
 [ -n "$cmd" ] || die "usage: ha-install.sh compose|nginx|gate|metrics-token|rollback [--apply]"
 if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "APPLY needs root"; fi
 
+idpha_begin ha-install
 mode_banner
-load_values
-# Host layout and secret-file locations are private values (AGENTS.md § 1): no defaults.
-require HA_DIR
+# Host layout, hostnames and secret-file REFERENCES come from the params document: no defaults.
+require HA_DIR KC_HOSTNAME LINKS_HOSTNAME IDP_CERT_DIR LINKS_CERT_DIR
+PARAMS_FILE="$HA_DIR/idpha-params.json"
 COMPOSE_DEST="${COMPOSE_DEST:-$HA_DIR/compose.yml}"
 BIN_DEST="${BIN_DEST:-$HA_DIR/bin}"
 METRICS_TOKEN_FILE="${METRICS_TOKEN_FILE:-}"
 export HA_DIR
 
-KC_HOSTNAME="${KC_HOSTNAME:-idp.dotmac.io}"
-LINKS_HOSTNAME="${LINKS_HOSTNAME:-links.dotmac.io}"
-IDP_CERT_DIR="${IDP_CERT_DIR:-/etc/ssl/idp}"
-LINKS_CERT_DIR="${LINKS_CERT_DIR:-/etc/ssl/links}"
 export KC_HOSTNAME LINKS_HOSTNAME IDP_CERT_DIR LINKS_CERT_DIR
 
 hostname_ok() { [[ "$1" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]]; }
@@ -186,7 +185,7 @@ do_gate_noreload() {
 	render "$REPO_ROOT/ha/nginx/gate-closed.conf.tmpl" | put_file "$GATE_DEST" 644
 }
 
-NODE_SCRIPTS="lib-idpha.sh ha-backup.sh idpha-collect.sh host-check.sh verify-ha.sh verify.sh policy-eval.sh idpha-rolling-maint.sh patroni-sync.sh"
+NODE_SCRIPTS="idpha-params.py lib-idpha.sh ha-backup.sh idpha-collect.sh host-check.sh verify-ha.sh verify.sh policy-eval.sh idpha-rolling-maint.sh patroni-sync.sh"
 
 do_scripts() {
 	local f
@@ -199,6 +198,10 @@ do_scripts() {
 		put_file "$(dirname "$BIN_DEST")${f#"$REPO_ROOT"}" 640 <"$f"
 	done
 	put_file "$(dirname "$BIN_DEST")/ha/image.pin" 640 <"$REPO_ROOT/ha/image.pin"
+	put_file "$(dirname "$BIN_DEST")/ha/params.schema.json" 640 <"$REPO_ROOT/ha/params.schema.json"
+	# The timers need the params on the host: a copy of the validated document
+	# (it holds topology, no secret; credentials are references inside it).
+	put_file "$PARAMS_FILE" 600 <"$IDPHA_PARAMS"
 }
 
 unit_names() {
@@ -213,7 +216,7 @@ do_units() {
 	local n
 	n="$(unit_names "${1:-}")"
 	if [ "$1" = backup ]; then require BACKUP_ENV_FILE; else BACKUP_ENV_FILE="${BACKUP_ENV_FILE:-/nonexistent}"; fi
-	export BACKUP_ENV_FILE
+	export BACKUP_ENV_FILE PARAMS_FILE
 	render "$REPO_ROOT/ha/systemd/$n.service" | put_file "/etc/systemd/system/$n.service" 644
 	render "$REPO_ROOT/ha/systemd/$n.timer" | put_file "/etc/systemd/system/$n.timer" 644
 	run systemctl daemon-reload
@@ -247,3 +250,4 @@ case "$cmd" in
 		;;
 	*) die "unknown command '$cmd'" ;;
 esac
+idpha_end

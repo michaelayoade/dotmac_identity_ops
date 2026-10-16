@@ -3,7 +3,7 @@
 # Changes nothing, prints no secret, needs root only to read ufw/sshd -T state.
 # One JSON document on stdout (and to --out, mode 600); exit 1 if any check FAILs.
 #
-#   host-check.sh [--phase pre-keycloak|running] [--gate closed|open] [--out FILE]
+#   host-check.sh --params FILE [--phase pre-keycloak|running] [--gate closed|open] [--out FILE]
 #
 # --phase pre-keycloak  Keycloak is stopped (H1/H2 window): listener checks for
 #                       8080/9000 are SKIPPED, not passed.
@@ -13,10 +13,8 @@
 # Statuses: PASS | FAIL | WARN | SKIP. WARN never fails the run but is reported;
 # SKIP means "could not be judged here" and is never counted as a pass.
 #
-# Values (private): PEER_PUBLIC_1/2 OVERLAY_ADDR APT_UPGRADE_TIME KC_HOSTNAME
-#   CERT_FILES (name=path ...) PROVIDER_CRED_FILE (provider credential file; SKIP if unset)
-#   HA_DIR
-#   CACHE_SHA256 (optional: pinned hash of cache-ispn.xml)
+# Parameters: the typed params document (sections node, host-check, plus the apt time
+# from harden-ha and the hostname from ha-install when present). Read-only: no digest.
 
 set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,6 +35,10 @@ while [ $# -gt 0 ]; do
 			gate="${2:-}"
 			shift 2
 			;;
+		--params)
+			IDPHA_PARAMS="${2:-}"
+			shift 2
+			;;
 		--out)
 			outfile="${2:-}"
 			shift 2
@@ -47,10 +49,9 @@ done
 case "$phase" in pre-keycloak | running) ;; *) die "--phase must be pre-keycloak or running" ;; esac
 case "$gate" in closed | open) ;; *) die "--gate must be closed or open" ;; esac
 
-load_values
-require NODE_NAME PEER_PUBLIC_1 PEER_PUBLIC_2 OVERLAY_ADDR APT_UPGRADE_TIME
+idpha_begin host-check runtime
+require NODE_NAME PEER_PUBLIC_1 PEER_PUBLIC_2 OVERLAY_ADDR APT_UPGRADE_TIME KC_HOSTNAME
 
-KC_HOSTNAME="${KC_HOSTNAME:-idp.dotmac.io}"
 WG_IF="${WG_IF:-wg0}"
 WG_UNIT="${WG_UNIT:-wg-quick@wg0.service}"
 require HA_DIR

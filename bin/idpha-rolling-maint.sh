@@ -4,7 +4,7 @@
 # all three nodes at once (H-F1). Run on the node being maintained, as root, one
 # node at a time, replicas first; never from a timer until packet H5 has proven it.
 #
-#   idpha-rolling-maint.sh [--apply] [--allow-reboot]
+#   idpha-rolling-maint.sh --params FILE [--plan | --apply --expect-digest D] [--allow-reboot]
 #
 # Steps (dry-run prints them, changing nothing):
 #   1. preflight: 3 healthy etcd members, Patroni healthy, WireGuard handshakes fresh
@@ -18,7 +18,7 @@
 # never restarts a service outside the allowlist, never touches a second node.
 #
 # Knobs: PATRONICTL PATRONI_CONF  RESTART_ALLOWLIST (patroni haproxy nginx keepalived etcd fail2ban)
-#        HEALTH_WAIT_S (120)  Values (private): OVERLAY_ADDR WG_IF
+#        HEALTH_WAIT_S (120)  Parameters: the typed params document (--params, --plan, --expect-digest)
 
 set -euo pipefail
 LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,16 +30,15 @@ PATRONI_CONF="${PATRONI_CONF:-/etc/patroni/config.yml}"
 RESTART_ALLOWLIST="${RESTART_ALLOWLIST:-patroni haproxy nginx keepalived etcd fail2ban}"
 HEALTH_WAIT_S="${HEALTH_WAIT_S:-120}"
 ALLOW_REBOOT=0
-args=()
-for a in "$@"; do
+parse_common_flags "$@"
+for a in ${REST_ARGS[@]+"${REST_ARGS[@]}"}; do
 	case "$a" in
 		--allow-reboot) ALLOW_REBOOT=1 ;;
-		*) args+=("$a") ;;
+		*) die "unknown argument '$a'" ;;
 	esac
 done
-parse_common_flags ${args[@]+"${args[@]}"}
+idpha_begin rolling-maint
 mode_banner
-load_values
 require OVERLAY_ADDR
 WG_IF="${WG_IF:-wg0}"
 if is_apply && [ "${IDPHA_ROOT:-}" = "" ] && [ "$(id -u)" != "0" ]; then die "APPLY needs root"; fi
@@ -130,3 +129,4 @@ if [ -f "$(hostpath /var/run/reboot-required)" ]; then
 else
 	okline "no reboot required"
 fi
+idpha_end

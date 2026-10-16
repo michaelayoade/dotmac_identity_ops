@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=oneshot
 # MC_HOST_<alias> (write-only identity) comes from here, root 600; never from Git.
 EnvironmentFile=@@BACKUP_ENV_FILE@@
-ExecStart=@@HA_DIR@@/bin/ha-backup.sh --apply
+ExecStart=@@HA_DIR@@/bin/ha-backup.sh --params @@PARAMS_FILE@@ --apply
 Nice=10
 NoNewPrivileges=true
 PrivateTmp=true

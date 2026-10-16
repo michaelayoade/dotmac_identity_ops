@@ -30,9 +30,9 @@ if [[ $- == *x* ]]; then
 	exit 2
 fi
 
-load_values
-require HA_DIR
-HA_VERIFY_ENV="${HA_VERIFY_ENV:-$HA_DIR/verify.env}"
+parse_common_flags "$@"
+idpha_begin verify-ha runtime
+require HA_DIR HA_VERIFY_ENV
 [ -r "$HA_VERIFY_ENV" ] || die "verifier credentials file not readable (root 600; the operator places them there by hidden prompt)"
 if [ "${IDPHA_ALLOW_UNSAFE_VALUES:-0}" != "1" ]; then
 	[ "$(file_mode "$HA_VERIFY_ENV")" = "600" ] && [ "$(file_owner "$HA_VERIFY_ENV")" = "0" ] || die "verifier credentials file must be root-owned mode 600"
