@@ -1,0 +1,14 @@
+[Unit]
+Description=IdP HA weekly rolling maintenance of THIS node (switchover first, then upgrades and restarts)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# DO NOT ENABLE YET. An apply needs a digest the operator approved, and there is
+# no plan expiry or host-wide apply lock yet; both must exist (the governed
+# operation wrapper) before this timer, or any automated apply, is enabled. As it
+# stands an unattended run is refused for lack of a digest. The script itself
+# refuses unless the whole cluster is healthy, never touches a second node,
+# switches the leader away before upgrading it, and never reboots (the reboot flag is not passed).
+ExecStart=@@HA_DIR@@/bin/idpha-rolling-maint.sh --params @@PARAMS_FILE@@ --apply
+TimeoutStartSec=3600

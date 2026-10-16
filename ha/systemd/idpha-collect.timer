@@ -1,0 +1,11 @@
+[Unit]
+Description=IdP HA metrics collector, every 30 s
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=30
+AccuracySec=5
+Unit=idpha-collect.service
+
+[Install]
+WantedBy=timers.target

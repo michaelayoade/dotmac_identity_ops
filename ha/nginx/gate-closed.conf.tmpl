@@ -1,0 +1,8 @@
+# Managed by dotmac_identity_ops (bin/ha-install.sh gate closed).
+# CLOSED: only the listed sources reach the IdP. Everyone else gets 503. Two
+# public Keycloaks with one issuer and diverging data are an auth bypass
+# (PLAN second hard rule), so the HA vhost stays closed until the cutover.
+geo $idp_gate {
+    default 0;
+@@GATE_ALLOW_LINES@@
+}

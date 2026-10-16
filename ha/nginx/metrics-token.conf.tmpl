@@ -1,0 +1,7 @@
+# Managed by dotmac_identity_ops (bin/ha-install.sh metrics). Mode 600, root.
+# The bearer value is read from a root-600 file at install time; this file is
+# the only place on the host that carries it in nginx syntax.
+map $http_authorization $idpha_metrics_ok {
+    default 0;
+    "Bearer @@METRICS_BEARER@@" 1;
+}

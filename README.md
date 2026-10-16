@@ -44,6 +44,7 @@ tests/
   required-cases.tsv         the fixture ratchet (two-directional)
   run-policy-tests.sh        the sensitivity proof
 compose/docker-compose.yml image pin and runtime configuration
+ha/                        IdP HA node templates and reviewed files (see ha/README.md)
 docs/                      POLICY, SECRETS, RECOVERY, HOST-IMPORT-TODO
 ```
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly rolling maintenance (installed DISABLED; enabling it is an operator step)
+
+[Timer]
+OnCalendar=@@MAINT_ON_CALENDAR@@
+Persistent=false
+Unit=idpha-maint.service
+
+[Install]
+WantedBy=timers.target

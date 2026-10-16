@@ -1,0 +1,14 @@
+# Pinned tooling for the HA backup (M-4). Nothing here is ever fetched unpinned.
+#
+# DEFAULT uploader: rclone from the Ubuntu archive, installed by apt at EXACTLY this
+# version (apt verifies the archive signature). Credentials only via RCLONE_CONFIG_*
+# in the root-600 env file referenced by backup_env_file, never argv.
+RCLONE_APT_VERSION=1.60.1+dfsg-3ubuntu0.24.04.6
+#
+# FALLBACK uploader mc (UNMAINTAINED upstream: the vendor archived it, its download site
+# answers 410, and it receives no security updates -- a recorded residual). The operator
+# copies the binary to the node (param mc_source_file) and the installer verifies size and
+# sha256 BEFORE installing. Provenance: the vendor client image at digest sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727,
+# RELEASE.2025-08-13T08-35-41Z.
+MC_SHA256=01f866e9c5f9b87c2b09116fa5d7c06695b106242d829a8bb32990c00312e891
+MC_BYTES=30535864

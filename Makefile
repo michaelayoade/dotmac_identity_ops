@@ -13,11 +13,15 @@ help: ## List targets
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  %-22s %s\n", $$1, $$2}'
 
 .PHONY: check
-check: secrets-selftest secrets policy ## Everything CI runs, offline
+check: secrets-selftest secrets policy ha-test ## Everything CI runs, offline
 
 .PHONY: policy
 policy: ## Offline policy gate + sensitivity proof
 	./bin/check-policy.sh
+
+.PHONY: ha-test
+ha-test: ## Offline behaviour tests for the IdP HA node scripts (stubbed commands)
+	./tests/ha/run-ha-tests.sh
 
 .PHONY: sensitivity
 sensitivity: ## The sensitivity proof alone
@@ -33,7 +37,7 @@ secrets-selftest: ## Prove the secret scanner rejects before trusting it
 
 .PHONY: lint
 lint: ## Static checks on the scripts (NOT test evidence)
-	shellcheck -S warning bin/*.sh tests/*.sh
+	shellcheck -S warning bin/*.sh tests/*.sh tests/ha/*.sh
 
 .PHONY: verify
 verify: ## LIVE verifier. Runs on the IdP host only; needs a real realm.

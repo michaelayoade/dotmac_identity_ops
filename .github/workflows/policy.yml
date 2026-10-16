@@ -65,6 +65,30 @@ jobs:
           echo "Green means: unsafe fixtures were REJECTED, each for its declared reason."
           echo "It does NOT mean unsafe configuration was accepted into the desired state."
 
+  ha-artefacts:
+    name: IdP HA node scripts (offline, stubbed commands)
+    runs-on: ubuntu-latest
+    # Proves the LOGIC of the HA node scripts with stubbed system commands and a
+    # temporary root: dry-run changes nothing, apply orders its steps safely,
+    # refusals fire, rendered files carry the properties they exist to deliver,
+    # no secret reaches output, and no address / host layout / secret location
+    # leaked into the tree. It does NOT prove nginx accepts the config or that
+    # any host behaves as the stubs assume; the packets' read-backs do that.
+    steps:
+      - uses: actions/checkout@v4
+      - name: HA behaviour tests
+        run: ./tests/ha/run-ha-tests.sh
+      - name: Tamper canary — an unpinned image must fail the gate
+        run: |
+          set -euo pipefail
+          sed -i 's/@sha256:[0-9a-f]\{64\}//' ha/image.pin
+          if ./tests/ha/run-ha-tests.sh > /tmp/out.txt 2>&1; then
+            echo "CANARY FAILED: the HA tests accepted a tag-only image pin."
+            exit 1
+          fi
+          grep -q 'FAIL  image.pin shape' /tmp/out.txt || { echo "CANARY: red, but not for the pin reason"; cat /tmp/out.txt; exit 1; }
+          echo "canary ok: dropping the digest turns the HA tests red"
+
   fixture-tamper-canary:
     name: the guard bites (canary)
     runs-on: ubuntu-latest
@@ -121,4 +145,4 @@ jobs:
         run: |
           set -euo pipefail
           shellcheck --version
-          shellcheck -S warning bin/*.sh tests/*.sh
+          shellcheck -S warning bin/*.sh tests/*.sh tests/ha/*.sh

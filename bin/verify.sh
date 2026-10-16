@@ -15,7 +15,7 @@
 #   KC_COMPOSE_FILE   compose file            (compose/docker-compose.yml)
 #   KC_COMPOSE_PROJECT compose project name   (keycloak)
 #   KC_SERVICE        keycloak service name   (keycloak)
-#   KC_DB_SERVICE     database service name   (postgres)
+#   KC_DB_SERVICE     database service name   (postgres; set EMPTY when the database is not a compose service)
 #   KC_REALM          realm to verify         (dotmac)
 #   KC_INTERNAL_URL   in-container server url (http://localhost:8080)
 #   KC_ADMIN_REALM    admin realm             (master)
@@ -26,6 +26,15 @@
 #                     recorded here; see docs/SECRETS.md. NEVER a literal in any
 #                     file.
 #   KC_ISSUER         the PERMANENT issuer    (https://idp.dotmac.io/realms/dotmac)
+#   KC_ADMIN_AUTH    password | client       (password). `client` logs kcadm in as a
+#                     service account: KC_ADMIN_USER is the client id and
+#                     KC_ADMIN_PASSWORD carries the client secret. Used by the HA
+#                     layout wrapper (bin/verify-ha.sh).
+#   KC_DISCOVERY_FETCH_BASE  where discovery/JWKS/auth are FETCHED from
+#                     ($KC_ISSUER). The issuer is still compared with the
+#                     permanent $KC_ISSUER; this only changes where the bytes come
+#                     from, so an HA node is graded before DNS points at it.
+#   VERIFY_EXTRA_REALMS  space-separated realms that must exist and be enabled ()
 #   VERIFY_DISCOVERY  check public discovery  (true)
 #   VERIFY_ROLLOUT    check that a disabled client refuses a ceremony (true)
 
@@ -40,12 +49,16 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 KC_COMPOSE_FILE="${KC_COMPOSE_FILE:-$REPO_ROOT/compose/docker-compose.yml}"
 KC_COMPOSE_PROJECT="${KC_COMPOSE_PROJECT:-keycloak}"
 KC_SERVICE="${KC_SERVICE:-keycloak}"
-KC_DB_SERVICE="${KC_DB_SERVICE:-postgres}"
+KC_DB_SERVICE="${KC_DB_SERVICE-postgres}" # unset -> postgres; set EMPTY -> no database container to check (HA layout)
 KC_REALM="${KC_REALM:-dotmac}"
 KC_INTERNAL_URL="${KC_INTERNAL_URL:-http://localhost:8080}"
 KC_ADMIN_REALM="${KC_ADMIN_REALM:-master}"
 KC_ADMIN_USER="${KC_ADMIN_USER:-admin}"
 KC_ISSUER="${KC_ISSUER:-https://idp.dotmac.io/realms/$KC_REALM}"
+KC_ADMIN_AUTH="${KC_ADMIN_AUTH:-password}"
+KC_DISCOVERY_FETCH_BASE="${KC_DISCOVERY_FETCH_BASE:-$KC_ISSUER}"
+VERIFY_EXTRA_REALMS="${VERIFY_EXTRA_REALMS:-}"
+case "$KC_ADMIN_AUTH" in password | client) ;; *) echo "verify.sh: KC_ADMIN_AUTH must be password or client" >&2; exit 2 ;; esac
 VERIFY_DISCOVERY="${VERIFY_DISCOVERY:-true}"
 VERIFY_ROLLOUT="${VERIFY_ROLLOUT:-true}"
 MANIFEST="${MANIFEST:-$REPO_ROOT/realm/expected-clients.json}"
@@ -90,19 +103,36 @@ dc() {
 # is itself being fed on stdin and then nests an exec that also consumes stdin
 # will silently eat its own remaining lines; stdin gets exactly one owner.
 kcadm() {
-	dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-		/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+	if [ "$KC_ADMIN_AUTH" = "client" ]; then
+		# client mode authenticates with a short-lived token (see kc_login): the
+		# long-lived client secret is never a command-line argument.
+		dc exec -T "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh "$@" --no-config --server "$KC_INTERNAL_URL" --token "$KC_BEARER_JWT" </dev/null
+	else
+		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+	fi
 }
+KC_BEARER_JWT=""
 
 kc_login() {
-	dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-		sh -c '/opt/keycloak/bin/kcadm.sh config credentials \
-		    --server "$0" --realm "$1" --user "$2" --password "$KCADM_PASSWORD" >/dev/null' \
-		"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
+	if [ "$KC_ADMIN_AUTH" = "client" ]; then
+		# Token request from the host (host networking: the loopback listener is
+		# reachable). The secret travels on curl's STDIN (printf is a builtin, so it
+		# is on no argv); only the resulting short-lived token is passed on.
+		KC_BEARER_JWT="$(printf 'grant_type=client_credentials&client_id=%s&%s=%s' "$KC_ADMIN_USER" "client_secret" "$KC_ADMIN_PASSWORD" |
+			curl -fsS --data-binary @- "$KC_INTERNAL_URL/realms/$KC_ADMIN_REALM/protocol/openid-connect/token" | jq -r '.access_token // empty')"
+		[ -n "$KC_BEARER_JWT" ]
+	else
+		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
+			sh -c '/opt/keycloak/bin/kcadm.sh config credentials \
+			    --server "$0" --realm "$1" --user "$2" --password "$KCADM_PASSWORD" >/dev/null' \
+			"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
+	fi
 }
 
 echo "== containers =="
-for svc in "$KC_SERVICE" "$KC_DB_SERVICE"; do
+for svc in "$KC_SERVICE" ${KC_DB_SERVICE:+"$KC_DB_SERVICE"}; do
 	state="$(dc ps --format json "$svc" 2>/dev/null | jq -r '.State // .Status // "unknown"' | head -1)"
 	if [ "$state" = "running" ]; then
 		ok "$svc is running"
@@ -187,7 +217,7 @@ while IFS= read -r entry; do
 	# authorization endpoint's answer is the evidence.
 	if [ "$VERIFY_ROLLOUT" = "true" ] && [ "$(jq -r '.enabled' <<<"$entry")" = "false" ]; then
 		code="$(curl -s -o /dev/null -w '%{http_code}' \
-			"$KC_ISSUER/protocol/openid-connect/auth?client_id=$client_id&response_type=code&redirect_uri=https://example.invalid/&scope=openid&code_challenge=x&code_challenge_method=S256" || echo 000)"
+			"$KC_DISCOVERY_FETCH_BASE/protocol/openid-connect/auth?client_id=$client_id&response_type=code&redirect_uri=https://example.invalid/&scope=openid&code_challenge=x&code_challenge_method=S256" || echo 000)"
 		if [ "$code" = "400" ]; then
 			ok "$client_id refuses an authorization request while disabled (HTTP 400)"
 		else
@@ -196,10 +226,22 @@ while IFS= read -r entry; do
 	fi
 done < <(jq -c '.clients[] | select(.class != "keycloak-builtin")' "$MANIFEST")
 
+if [ -n "$VERIFY_EXTRA_REALMS" ]; then
+	echo
+	echo "== additional realms =="
+	for extra in $VERIFY_EXTRA_REALMS; do
+		if kcadm get "realms/$extra" --fields realm,enabled >"$work/extra.json" 2>/dev/null && [ "$(jq -r '.enabled' "$work/extra.json")" = "true" ]; then
+			ok "realm $extra exists and is enabled"
+		else
+			fail "realm $extra is missing or disabled"
+		fi
+	done
+fi
+
 if [ "$VERIFY_DISCOVERY" = "true" ]; then
 	echo
 	echo "== public discovery =="
-	if curl -fsS "$KC_ISSUER/.well-known/openid-configuration" >"$work/disco.json"; then
+	if curl -fsS "$KC_DISCOVERY_FETCH_BASE/.well-known/openid-configuration" >"$work/disco.json"; then
 		got_issuer="$(jq -r '.issuer' "$work/disco.json")"
 		if [ "$got_issuer" = "$KC_ISSUER" ]; then
 			ok "issuer is the permanent $KC_ISSUER"
@@ -209,6 +251,8 @@ if [ "$VERIFY_DISCOVERY" = "true" ]; then
 			fail "issuer is $got_issuer, not the permanent $KC_ISSUER"
 		fi
 		jwks="$(jq -r '.jwks_uri' "$work/disco.json")"
+		# Fetched from the same base as discovery; the advertised host is only a name.
+		jwks="$KC_DISCOVERY_FETCH_BASE${jwks#"$KC_ISSUER"}"
 		if curl -fsS "$jwks" | jq -e '[.keys[] | select(.alg == "RS256")] | length > 0' >/dev/null; then
 			ok "JWKS advertises an RS256 key"
 		else
@@ -221,7 +265,7 @@ if [ "$VERIFY_DISCOVERY" = "true" ]; then
 		echo "note  realm advertises grant_types_supported = $(jq -c '.grant_types_supported' "$work/disco.json")"
 		echo "note  both are expected to be permissive; the control is the per-client pin, not the realm advertisement."
 	else
-		fail "could not fetch $KC_ISSUER/.well-known/openid-configuration"
+		fail "could not fetch $KC_DISCOVERY_FETCH_BASE/.well-known/openid-configuration"
 	fi
 fi
 
