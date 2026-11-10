@@ -60,6 +60,26 @@
       ]
     },
     {
+      "clientId": "dotmac-academy",
+      "class": "confidential-web",
+      "enabled": false,
+      "redirect_uris": [
+        "https://academy.dotmac.io/login/oidc/callback"
+      ],
+      "web_origins": [],
+      "desired_state_file": "realm/clients/dotmac-academy.json",
+      "provenance": "authored-from-spec",
+      "reconciled_from_host_at": null,
+      "rollout_gate": [
+        "Academy staff-pilot relying party (dotmac_academy_app OIDC PR).",
+        "Stays DISABLED until all of: the Academy OIDC build is deployed",
+        "with OIDC_ENABLED=true, this client's secret is delivered to the",
+        "Academy host through the held-secret path, and at least one staff",
+        "subject is explicitly bound in Academy. Enabling earlier would",
+        "advertise a login path whose Academy half cannot complete."
+      ]
+    },
+    {
       "clientId": "account",
       "class": "keycloak-builtin",
       "provenance": "authored-from-spec",
