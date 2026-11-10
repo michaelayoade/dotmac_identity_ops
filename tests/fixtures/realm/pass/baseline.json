@@ -1,5 +1,5 @@
 {
-  "_case": "Exactly the declared inventory: both Dotmac clients plus the six Keycloak builtins, each present once.",
+  "_case": "Exactly the declared inventory: all three Dotmac clients plus the six Keycloak builtins, each present once.",
   "_expect": {
     "policy": "realm",
     "reject_with": null
@@ -63,6 +63,26 @@
           "is not vacuous: without it, the live realm's real workspace client would",
           "read as an `inventory-unknown` failure. Its shape assertions are the",
           "confidential-web ones and are narrower than the mobile ones by design."
+        ]
+      },
+      {
+        "clientId": "dotmac-academy",
+        "class": "confidential-web",
+        "enabled": false,
+        "redirect_uris": [
+          "https://academy.dotmac.io/login/oidc/callback"
+        ],
+        "web_origins": [],
+        "desired_state_file": "realm/clients/dotmac-academy.json",
+        "provenance": "authored-from-spec",
+        "reconciled_from_host_at": null,
+        "rollout_gate": [
+          "Academy staff-pilot relying party (dotmac_academy_app OIDC PR).",
+          "Stays DISABLED until all of: the Academy OIDC build is deployed",
+          "with OIDC_ENABLED=true, this client's secret is delivered to the",
+          "Academy host through the held-secret path, and at least one staff",
+          "subject is explicitly bound in Academy. Enabling earlier would",
+          "advertise a login path whose Academy half cannot complete."
         ]
       },
       {
@@ -143,6 +163,29 @@
       "fullScopeAllowed": false,
       "redirectUris": [
         "https://workspace.dotmac.io/login/callback"
+      ],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "id.token.signed.response.alg": "RS256",
+        "post.logout.redirect.uris": ""
+      }
+    },
+    {
+      "clientId": "dotmac-academy",
+      "name": "Dotmac Academy",
+      "description": "Confidential server-side relying party for academy.dotmac.io staff sign-in (pilot cohort). Same security model as dotmac-workspace: a server-held secret, an HttpOnly cookie and a server-side single-use state store. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md. Declared disabled until the Academy OIDC build is deployed with its secret delivered; see the rollout gate in realm/expected-clients.json.",
+      "protocol": "openid-connect",
+      "enabled": false,
+      "publicClient": false,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "redirectUris": [
+        "https://academy.dotmac.io/login/oidc/callback"
       ],
       "webOrigins": [],
       "attributes": {

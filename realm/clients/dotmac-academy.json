@@ -1,0 +1,23 @@
+{
+  "clientId": "dotmac-academy",
+  "name": "Dotmac Academy",
+  "description": "Confidential server-side relying party for academy.dotmac.io staff sign-in (pilot cohort). Same security model as dotmac-workspace: a server-held secret, an HttpOnly cookie and a server-side single-use state store. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md. Declared disabled until the Academy OIDC build is deployed with its secret delivered; see the rollout gate in realm/expected-clients.json.",
+  "protocol": "openid-connect",
+  "enabled": false,
+  "publicClient": false,
+  "bearerOnly": false,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "serviceAccountsEnabled": false,
+  "fullScopeAllowed": false,
+  "redirectUris": [
+    "https://academy.dotmac.io/login/oidc/callback"
+  ],
+  "webOrigins": [],
+  "attributes": {
+    "pkce.code.challenge.method": "S256",
+    "id.token.signed.response.alg": "RS256",
+    "post.logout.redirect.uris": ""
+  }
+}
