@@ -25,6 +25,10 @@
 #                     a REQUIRED operator input with no default and is not
 #                     recorded here; see docs/SECRETS.md. NEVER a literal in any
 #                     file.
+#                     In password mode it is exported as KCADM_PASSWORD and passed to
+#                     the container by NAME only, never as a host argv value. The
+#                     kcadm login cache in the container is removed on exit (best
+#                     effort); client reads have .secret stripped at capture.
 #   KC_ISSUER         the PERMANENT issuer    (https://idp.dotmac.io/realms/dotmac)
 #   KC_ADMIN_AUTH    password | client       (password). `client` logs kcadm in as a
 #                     service account: KC_ADMIN_USER is the client id and
@@ -83,7 +87,18 @@ ok() { printf 'ok    %s\n' "$*"; }
 work="$(mktemp -d)"
 # Same verdict, now also cleaning up. Replacing the trap rather than adding a
 # second one, because bash keeps only the last EXIT trap.
-trap 'rm -rf "$work"; echo; echo "verify.sh: $verdict"' EXIT
+logged_in=false
+# Best effort: `kcadm config credentials` (password mode) leaves a master-admin
+# token cache in the container; remove it however this script exits.
+cleanup() {
+	rm -rf "$work"
+	if [ "$logged_in" = true ]; then
+		dc exec -T "$KC_SERVICE" sh -c 'rm -f "$HOME/.keycloak/kcadm.config"' </dev/null >/dev/null 2>&1 || true
+	fi
+	echo
+	echo "verify.sh: $verdict"
+}
+trap cleanup EXIT
 
 # Compose must be able to interpolate `${KC_DB_NAME:?}` and friends even when
 # this script is run on its own (e.g. `make verify`), not only as a step inside
@@ -96,7 +111,7 @@ dc() {
 	local -a envs=()
 	if [ -r "$CONFIG_ENV_FILE" ]; then envs+=(--env-file "$CONFIG_ENV_FILE"); fi
 	if [ -r "$SECRET_ENV_FILE" ]; then envs+=(--env-file "$SECRET_ENV_FILE"); fi
-	docker compose "${envs[@]}" -p "$KC_COMPOSE_PROJECT" -f "$KC_COMPOSE_FILE" "$@"
+	docker compose ${envs[@]+"${envs[@]}"} -p "$KC_COMPOSE_PROJECT" -f "$KC_COMPOSE_FILE" "$@"
 }
 
 # Every `docker compose exec -T` redirects stdin from /dev/null. A script that
@@ -109,11 +124,15 @@ kcadm() {
 		dc exec -T "$KC_SERVICE" \
 			/opt/keycloak/bin/kcadm.sh "$@" --no-config --server "$KC_INTERNAL_URL" --token "$KC_BEARER_JWT" </dev/null
 	else
-		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
+		dc exec -T -e KCADM_PASSWORD "$KC_SERVICE" \
 			/opt/keycloak/bin/kcadm.sh "$@" </dev/null
 	fi
 }
 KC_BEARER_JWT=""
+# Password mode: the value is passed to the container by NAME only
+# (`-e KCADM_PASSWORD`); docker reads it from this process's environment, so it
+# is never in the host's argv.
+if [ "$KC_ADMIN_AUTH" = "password" ]; then export KCADM_PASSWORD="$KC_ADMIN_PASSWORD"; fi
 
 kc_login() {
 	if [ "$KC_ADMIN_AUTH" = "client" ]; then
@@ -124,7 +143,8 @@ kc_login() {
 			curl -fsS --data-binary @- "$KC_INTERNAL_URL/realms/$KC_ADMIN_REALM/protocol/openid-connect/token" | jq -r '.access_token // empty')"
 		[ -n "$KC_BEARER_JWT" ]
 	else
-		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
+		logged_in=true
+		dc exec -T -e KCADM_PASSWORD "$KC_SERVICE" \
 			sh -c '/opt/keycloak/bin/kcadm.sh config credentials \
 			    --server "$0" --realm "$1" --user "$2" --password "$KCADM_PASSWORD" >/dev/null' \
 			"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
@@ -168,7 +188,8 @@ fi
 
 echo
 echo "== client inventory =="
-kcadm get clients -r "$KC_REALM" >"$work/clients.json" || fail "could not list clients"
+# `.secret` is stripped as the data is captured, before any temp file exists.
+{ kcadm get clients -r "$KC_REALM" | jq 'map(del(.secret))' >"$work/clients.json"; } || fail "could not list clients"
 if [ -s "$work/clients.json" ]; then
 	if "$EVAL" realm "$MANIFEST" "$work/clients.json"; then
 		ok "the realm holds exactly the declared client inventory"
@@ -200,7 +221,7 @@ while IFS= read -r entry; do
 		fail "$client_id: not present in the realm"
 		continue
 	fi
-	kcadm get "clients/$uuid" -r "$KC_REALM" >"$work/client.json" || {
+	{ kcadm get "clients/$uuid" -r "$KC_REALM" | jq 'del(.secret)' >"$work/client.json"; } || {
 		fail "$client_id: could not read the full client representation"
 		continue
 	}
