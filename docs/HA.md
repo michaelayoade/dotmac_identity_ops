@@ -104,8 +104,9 @@ weekly maintenance and the overdue-update alert.
 
 - The verifier's long-lived client secret no longer appears on a command line in
   client mode (`verify.sh` requests a short-lived token over stdin and hands only
-  the token to `kcadm`). The password mode used on the retiring single host still
-  passes `--password` to `kcadm` inside the container; that predates this work.
+  the token to `kcadm`). The password mode used on the retiring single host passes
+  the admin password only as `KC_CLI_PASSWORD`, named (not valued) on the
+  `docker compose exec` line, never as `--password` (see `docs/SECRETS.md`).
 - The default backup uploader is `rclone`, installed by apt at the exact Ubuntu
   build pinned in `ha/tools.pin` (archive-signed). Its settings and credentials
   reach it only as `RCLONE_CONFIG_<REMOTE>_*` variables from the root-600 file
