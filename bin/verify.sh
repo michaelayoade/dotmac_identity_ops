@@ -29,9 +29,8 @@
 #                     it when --password is omitted) and passed to the container by
 #                     NAME only, so it is on no argv. The kcadm login cache lives in
 #                     a per-run mktemp directory in the container and that exact
-#                     path is removed and its absence confirmed on exit; client reads have
-#                     .secret and attributes["client.secret.rotated"] stripped at
-#                     capture.
+#                     path is removed and its absence confirmed on exit. Reads
+#                     use the server-masked partial-export projection.
 #   KC_ISSUER         the PERMANENT issuer    (https://idp.dotmac.io/realms/dotmac)
 #   KC_ADMIN_AUTH    password | client       (password). `client` logs kcadm in as a
 #                     service account: KC_ADMIN_USER is the client id and
@@ -211,9 +210,17 @@ else
 	exit 1
 fi
 
+# shellcheck source=bin/kcadm-snapshot.sh
+. "$REPO_ROOT/bin/kcadm-snapshot.sh"
+if ! kcadm_snapshot "$work/snapshot.json"; then
+	fail "could not obtain the masked admin snapshot"
+	exit 1
+fi
+jq '.realm' "$work/snapshot.json" >"$work/realm.json"
+jq '.clients' "$work/snapshot.json" >"$work/clients.json"
+
 echo
 echo "== realm =="
-kcadm get "realms/$KC_REALM" >"$work/realm.json" || fail "could not read realm $KC_REALM"
 if [ -s "$work/realm.json" ]; then
 	while IFS= read -r key; do
 		want="$(jq -c --arg k "$key" '.[$k]' "$REALM_DESIRED")"
@@ -228,8 +235,6 @@ fi
 
 echo
 echo "== client inventory =="
-# `.secret` is stripped as the data is captured, before any temp file exists.
-{ kcadm get clients -r "$KC_REALM" | jq 'map(del(.secret) | del(.attributes["client.secret.rotated"]))' >"$work/clients.json"; } || fail "could not list clients"
 if [ -s "$work/clients.json" ]; then
 	if "$EVAL" realm "$MANIFEST" "$work/clients.json"; then
 		ok "the realm holds exactly the declared client inventory"
@@ -252,19 +257,14 @@ while IFS= read -r entry; do
 		;;
 	esac
 
-	# Fetch the client by its internal id, so the FULL representation is graded.
-	# `kcadm --fields attributes` can render `{}` for nested attributes, which
-	# would turn a MISSING S256 pin into a silent pass — the exact failure this
-	# verifier exists to prevent.
+	# The shared server-masked snapshot preserves the complete policy field
+	# footprint, including nested PKCE attributes and missing booleans.
 	uuid="$(jq -r --arg c "$client_id" '.[] | select(.clientId == $c) | .id' "$work/clients.json" | head -1)"
 	if [ -z "$uuid" ] || [ "$uuid" = "null" ]; then
 		fail "$client_id: not present in the realm"
 		continue
 	fi
-	{ kcadm get "clients/$uuid" -r "$KC_REALM" | jq 'del(.secret) | del(.attributes["client.secret.rotated"])' >"$work/client.json"; } || {
-		fail "$client_id: could not read the full client representation"
-		continue
-	}
+	jq --arg id "$uuid" '.clients[] | select(.id == $id)' "$work/snapshot.json" >"$work/client.json"
 	printf '%s' "$entry" >"$work/entry.json"
 
 	if "$EVAL" "$policy" "$work/entry.json" "$work/client.json"; then
@@ -291,7 +291,7 @@ if [ -n "$VERIFY_EXTRA_REALMS" ]; then
 	echo
 	echo "== additional realms =="
 	for extra in $VERIFY_EXTRA_REALMS; do
-		if kcadm get "realms/$extra" --fields realm,enabled >"$work/extra.json" 2>/dev/null && [ "$(jq -r '.enabled' "$work/extra.json")" = "true" ]; then
+		if kcadm_snapshot "$work/extra.json" "$extra" && [ "$(jq -r '.realm.enabled' "$work/extra.json")" = "true" ]; then
 			ok "realm $extra exists and is enabled"
 		else
 			fail "realm $extra is missing or disabled"

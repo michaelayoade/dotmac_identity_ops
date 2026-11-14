@@ -1,0 +1,44 @@
+name: native-masked-export
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-keycloak:
+    name: native Keycloak 26.0.8 masked export qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Fetch pinned official native distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 15 --max-time 120 --max-filesize 150000000 \
+            --output "$RUNNER_TEMP/keycloak-26.0.8.tar.gz" \
+            https://github.com/keycloak/keycloak/releases/download/26.0.8/keycloak-26.0.8.tar.gz
+          echo '8cf143b894afcf7d3be4549dc5af4790bda63bd471a5ac8e384094fb729e4b15  '"$RUNNER_TEMP/keycloak-26.0.8.tar.gz" | sha256sum --check --status
+      - name: Qualify server masking, real CLI projection, and policy sensitivity
+        run: python3 -I -B tests/native_masked_export.py "$RUNNER_TEMP/keycloak-26.0.8.tar.gz"
+      # No artifact uploads: raw responses stay in memory; server logs are discarded.
+      - name: Remove downloaded archive
+        if: always()
+        run: rm -f "$RUNNER_TEMP/keycloak-26.0.8.tar.gz"

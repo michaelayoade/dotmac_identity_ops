@@ -19,8 +19,7 @@
 #                       of the same keys; arrays compared sorted, an empty-string
 #                       attribute equals an absent one; live-only attribute keys
 #                       are listed by NAME only). `secret` and
-#                       attributes["client.secret.rotated"] are removed at capture
-#                       and never compared or printed)                  (false)
+#                       attributes["client.secret.rotated"] are never compared or printed)                  (false)
 #   APPLY_ONLY          comma-separated clientIds. Clients not listed get no create
 #                       and no update. A name that is not an applicable client in
 #                       the manifest is refused (exit 2). Empty = all   ()
@@ -38,8 +37,7 @@
 # (`-e KC_CLI_PASSWORD`), so it is on no argv, host or container. Each run uses
 # its own kcadm login cache and staging directory inside the container (a
 # mktemp -d, passed as `--config`), removed exactly on exit, so concurrent runs
-# cannot delete each other's login. Client reads have `.secret` and
-# attributes["client.secret.rotated"] stripped before any temp file.
+# cannot delete each other's login. Reads use a server-masked partial export and persist only its safe projection.
 
 set -euo pipefail
 
@@ -213,9 +211,10 @@ kc_cfg="$kc_dir/kcadm.config"
 dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
 	/opt/keycloak/bin/kcadm.sh config credentials --server "$KC_INTERNAL_URL" --realm "$KC_ADMIN_REALM" --user "$KC_ADMIN_USER" --config "$kc_cfg" >/dev/null </dev/null
 
-# Only ids and names are needed from the list; .secret is stripped as it is
-# captured, before anything is written to disk.
-kcadm get clients -r "$KC_REALM" --fields id,clientId | jq 'map(del(.secret) | del(.attributes["client.secret.rotated"]))' >"$work/clients.json"
+# shellcheck source=bin/kcadm-snapshot.sh
+. "$REPO_ROOT/bin/kcadm-snapshot.sh"
+kcadm_snapshot "$work/snapshot.json"
+jq '.clients' "$work/snapshot.json" >"$work/clients.json"
 
 # Pass 1: plan. Nothing is written here.
 plan=()
@@ -246,13 +245,12 @@ fi
 
 # Field-level diff: declared keys vs the live value of the same keys, attributes
 # key by key. Arrays are compared sorted; an empty-string declared attribute
-# equals an absent live one. .secret and attributes["client.secret.rotated"] are
-# stripped at capture (and from the declared side). Live-only attribute keys are
+# equals an absent live one. Credential fields are excluded by the projection
+# (and from the declared side). Live-only attribute keys are
 # listed by NAME only, never by value.
 show_diff() { # show_diff <client_id> <uuid> <declared-file> (client_id is for the caller's log only)
 	local uuid="$2"
-	kcadm get "clients/$uuid" -r "$KC_REALM" |
-		jq 'del(.secret) | del(.attributes["client.secret.rotated"])' >"$work/live.json"
+	jq --arg id "$uuid" '.clients[] | select(.id == $id)' "$work/snapshot.json" >"$work/live.json"
 	local out names
 	out="$(jq -r --slurpfile live "$work/live.json" '
 		def norm: walk(if type == "array" then sort else . end);
@@ -264,9 +262,11 @@ show_diff() { # show_diff <client_id> <uuid> <declared-file> (client_id is for t
 		      | select(((($e.value | norm) != ($lv | norm))) and (($e.value == "" and $lv == null) | not))
 		      | "    attributes.\($e.key): declared=\($e.value | tojson) live=\($lv | tojson)" ] )
 		| .[]' "$3")"
-	names="$(jq -r --slurpfile live "$work/live.json" '
-		(del(.secret) | del(.attributes["client.secret.rotated"])) as $d | $live[0] as $l
-		| [ ($l.attributes // {}) | keys[] | select(. as $k | (($d.attributes // {}) | has($k)) | not) ] | join(", ")' "$3")"
+	names="$(jq -r --arg id "$uuid" --slurpfile declared "$3" '
+		[ (.attributeNames[$id] // [])[] ] +
+		[ .clients[] | select(.id == $id) | (.attributes // {}) | keys[]
+		  | select(. as $k | (($declared[0].attributes // {}) | has($k)) | not) ]
+		| unique | join(", ")' "$work/snapshot.json")"
 	if [ -z "$out" ]; then
 		echo "    no change"
 	else

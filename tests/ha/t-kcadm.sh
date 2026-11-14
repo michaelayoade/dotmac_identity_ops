@@ -2,8 +2,8 @@
 # t-kcadm.sh — offline behaviour tests for bin/apply-clients.sh and bin/verify.sh
 # against a STUB `docker` (no Keycloak, no container, no network). Proves script
 # logic only: APPLY_ONLY scoping, the update refusal, the dry-run diff, that the
-# admin password is never in a constructed argv, that .secret never reaches a
-# temp file or output, and that the kcadm login cache is removed on exit. It does
+# admin password is never in a constructed argv, that masked export reads are
+# projected without credential material or unrelated export values, and that the kcadm login cache is removed on exit. It does
 # NOT prove real kcadm behaviour (e.g. update -f semantics) or real container paths.
 set -uo pipefail
 # shellcheck source=tests/ha/lib.sh
@@ -24,14 +24,16 @@ mkdir -p "$KSTUB"
 cat >"$KSTUB/docker" <<STUBEOF
 #!/usr/bin/env bash
 echo "docker \$*" >>"$T/argv.log"
-if grep -rqF -e "$SEC" -e "$ROT" "$TMPD" 2>/dev/null; then echo leak >>"$T/leak.log"; fi
+if grep -rqF -e "$SEC" -e "$ROT" -e '**********' -e v-live-only -e discard-this-component -e discard-this-user "$TMPD" 2>/dev/null; then echo leak >>"$T/leak.log"; fi
 case "\$*" in
 *"config credentials"*) if [ -n "\${CANCEL_SIGNAL:-}" ]; then kill -s "\$CANCEL_SIGNAL" "\$PPID"; exit 0; fi ;;
 esac
 case "\$*" in
-*"kcadm.sh get clients/"*) cat "$T/live-client.json" ;;
-*"kcadm.sh get clients"*) cat "$T/live-list.json" ;;
-*"kcadm.sh get realms/"*) echo '{"realm":"dotmac"}' ;;
+*"kcadm.sh get clients"*|*"kcadm.sh get realms/"*) echo forbidden >>"$T/forbidden-get.log"; exit 91 ;;
+*"kcadm.sh create partial-export "*)
+  [ -z "\${FAIL_EXPORT:-}" ] || { echo "$SEC" >&2; exit 27; }
+  if [ -n "\${INVALID_EXPORT:-}" ]; then printf '%s' '{invalid'; else cat "$T/masked-export.json"; fi
+  ;;
 *" mktemp "*) printf '%s\n' "\${KCADM_DIR:-/tmp/kcadm.TESTDIR}"; : >"$T/cache.present" ;;
 *" rm -rf "*)
   if [ "\${!#}" != /tmp/kcadm.TESTDIR ]; then echo unexpected >"$T/unrelated-delete.log"; exit 24; fi
@@ -71,6 +73,16 @@ setup() { # setup <live-list-json> <live-client-json>
 	: >"$T/leak.log"
 	: >"$T/premature.log"
 	: >"$T/unrelated-delete.log"
+	: >"$T/forbidden-get.log"
+	# Model server-side masking BEFORE the stub returns any HTTP-equivalent data.
+	# Unrelated export data must be discarded by the projection.
+	jq -n --slurpfile clients "$T/live-list.json" --slurpfile live "$T/live-client.json" '
+	  {realm:"dotmac", enabled:true, sslRequired:"all", bruteForceProtected:true,
+	   components:{unrelated:"discard-this-component"}, users:[{unrelated:"discard-this-user"}],
+	   clients:[$clients[0][] | . as $c |
+	     (if $c.id == "u-ws" then $live[0] + {id:$c.id,clientId:$c.clientId} else $c end)
+	     | .secret = "**********"
+	     | if .attributes then .attributes["client.secret.rotated"] = "**********" else . end]}' >"$T/masked-export.json"
 	rm -f "$T/cache.present"
 }
 run_apply() { # run_apply <outfile> [args...]; env passes through
@@ -208,7 +220,8 @@ hasnt "verify output hides rotated secret" "$T/v1" "$ROT"
 hasnt "verify output hides client secret" "$T/v1" "$SEC"
 if [ ! -s "$T/leak.log" ]; then ok "no temp file ever held the secret (verify)"; else bad "secret reached a temp file (verify)"; fi
 if [ -z "$(ls -A "$TMPD")" ]; then ok "verify left no temp files"; else bad "verify left temp files"; fi
-if grep -q 'kcadm.sh get clients' "$T/argv.log"; then ok "verify exercised the client reads"; else bad "verify never read clients"; fi
+has "verify uses masked export" "$T/argv.log" 'create partial-export'
+if [ ! -s "$T/forbidden-get.log" ]; then ok "verify made no ordinary client or realm GET"; else bad "verify made an unsafe GET"; fi
 
 section "cleanup is a success barrier"
 for script in apply verify; do
@@ -228,7 +241,25 @@ for script in apply verify; do
 	expect "$script succeeds after confirmed absence" 0 $?
 	if [ ! -s "$T/premature.log" ]; then ok "$script success follows absence query"; else bad "$script reported success before cleanup"; fi
 	if [ ! -s "$T/unrelated-delete.log" ]; then ok "$script removes no unrelated directory"; else bad "$script removed an unrelated directory"; fi
+	expect "$script reuses exactly one snapshot" 1 "$(grep -c 'create partial-export' "$T/argv.log")"
+	has "$script requests server-masked clients" "$T/argv.log" 'create partial-export'
+	has "$script exports clients" "$T/argv.log" 'exportClients=true'
+	has "$script omits groups and roles" "$T/argv.log" 'exportGroupsAndRoles=false'
+	if [ ! -s "$T/forbidden-get.log" ]; then ok "$script made no ordinary client or realm GET"; else bad "$script made an unsafe GET"; fi
 	has "$script queries only its own directory" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
+	for export_failure in FAIL_EXPORT INVALID_EXPORT; do
+		cleanup_setup
+		export "$export_failure=1"
+		cleanup_run
+		rc=$?
+		unset "$export_failure"
+		expect "$script $export_failure fails closed" 1 "$rc"
+		hasnt "$script export failure hides raw diagnostics" "$T/cleanup-out" "$SEC"
+		hasnt "$script export failure cannot pass" "$T/cleanup-out" 'verify.sh: PASSED'
+		hasnt "$script export failure cannot claim applied" "$T/cleanup-out" 'desired state applied'
+		if [ ! -s "$T/writes.log" ]; then ok "$script export failure causes no write"; else bad "$script wrote after export failure"; fi
+		has "$script export failure still removes cache" "$T/argv.log" 'rm -rf /tmp/kcadm.TESTDIR'
+	done
 	for failure in FAIL_CLEANUP CACHE_REMAINS; do
 		cleanup_setup
 		export "$failure=1"

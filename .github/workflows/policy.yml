@@ -76,6 +76,11 @@ jobs:
     # any host behaves as the stubs assume; the packets' read-backs do that.
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Masked snapshot projection contracts
+        run: python -I -S -B tests/test_kcadm_projection.py
       - name: HA behaviour tests
         run: ./tests/ha/run-ha-tests.sh
       - name: Tamper canary — an unpinned image must fail the gate

@@ -79,17 +79,43 @@ table, and is in no log and no file. (As for any process, it is readable by
 root and by the same user through `/proc/<pid>/environ`.) A test asserts that
 neither `--password` nor the value appears in any recorded argv.
 
-Client reads (`get clients`, `get clients/<uuid>`) include every confidential
-client's `secret`, and Keycloak does not strip `attributes["client.secret.rotated"]`
-either. Both scripts remove both with `jq` as the data is captured, before it
-reaches any temp file, and the apply dry-run diff compares declared keys only
-(live-only attribute keys are listed by name, never value).
+Ordinary client reads (`get clients`, `get clients/<uuid>`) include confidential
+client secrets in Keycloak 26.0. CLI field selection and downstream deletion
+happen after that transport. Apply and verify therefore use a server-masked
+partial export, piped directly into the shared allowlist projection. Active and
+rotated client secrets are masked by Keycloak before the HTTP response is
+serialized. The response is never saved or captured in a shell variable.
+
+The export includes other realm configuration. The projection discards service
+accounts, components, provider configuration, private-key attributes, arbitrary
+attribute values and vault references before any file or operator-visible
+output. Only the declared realm fields, complete client inventory, policy and
+declared-state fields, and names of additional attributes remain. Errors are
+content-free. There is no fallback to ordinary client GETs.
+The export endpoint requires `manage-realm` and client-view permission. An
+existing principal without those permissions fails closed; this change grants
+no roles and does not authorize an operator to broaden its permissions.
+
+Public and bearer-only clients normalize the secret field to null, matching
+Keycloak's ordinary client representation. Other non-null secret fields become
+a fixed, nonsecret presence indicator. This is a serialization contract; it
+does not prove that the database stores no secret for a public client. The
+existing policy programs and sensitivity fixtures remain the graders.
 
 `kcadm config credentials` leaves a master-admin token cache. Each run keeps it
-in its own `mktemp -d` directory inside the container (passed as `--config` on
-every kcadm call, staged desired-state files live there too) and removes exactly
-that directory in its `EXIT` trap, as best effort. Concurrent runs therefore
-cannot delete each other's login.
+in its own validated `mktemp -d` directory inside the container, passed as
+`--config` on every kcadm call. Cleanup removes exactly that directory and
+confirms absence. Local and container cleanup run independently; an uncertain
+removal or cancellation prevents a success verdict. Concurrent runs cannot
+delete each other's login cache. A previous command failure remains a failure.
+
+The reviewed masking contract is based on standard Keycloak 26.0.0 and 26.0.8.
+The [export manager](https://github.com/keycloak/keycloak/blob/26.0.8/model/storage-private/src/main/java/org/keycloak/storage/datastore/DefaultExportImportManager.java)
+applies [masking](https://github.com/keycloak/keycloak/blob/26.0.8/server-spi-private/src/main/java/org/keycloak/models/utils/StripSecretsUtils.java)
+before serialization; normalization follows the ordinary
+[client representation](https://github.com/keycloak/keycloak/blob/26.0.8/server-spi-private/src/main/java/org/keycloak/models/utils/ModelToRepresentation.java).
+Hosted native qualification uses 26.0.8 and disposable credentials; it proves
+the tested transport and projection, not the current live realm.
 
 **Residuals, named rather than hidden:**
 
