@@ -26,17 +26,38 @@ cat >"$KSTUB/docker" <<STUBEOF
 echo "docker \$*" >>"$T/argv.log"
 if grep -rqF -e "$SEC" -e "$ROT" "$TMPD" 2>/dev/null; then echo leak >>"$T/leak.log"; fi
 case "\$*" in
+*"config credentials"*) if [ -n "\${CANCEL_SIGNAL:-}" ]; then kill -s "\$CANCEL_SIGNAL" "\$PPID"; exit 0; fi ;;
+esac
+case "\$*" in
 *"kcadm.sh get clients/"*) cat "$T/live-client.json" ;;
 *"kcadm.sh get clients"*) cat "$T/live-list.json" ;;
 *"kcadm.sh get realms/"*) echo '{"realm":"dotmac"}' ;;
-*" mktemp "*) echo /tmp/kcadm.TESTDIR ;;
+*" mktemp "*) printf '%s\n' "\${KCADM_DIR:-/tmp/kcadm.TESTDIR}"; : >"$T/cache.present" ;;
+*" rm -rf "*)
+  if [ "\${!#}" != /tmp/kcadm.TESTDIR ]; then echo unexpected >"$T/unrelated-delete.log"; exit 24; fi
+  if [ -n "\${CANCEL_CLEANUP:-}" ]; then kill -s "\$CANCEL_CLEANUP" "\$PPID"; fi
+  [ -z "\${FAIL_CLEANUP:-}" ] || exit 23
+  [ -n "\${CACHE_REMAINS:-}" ] || rm -f "$T/cache.present"
+  ;;
+*'test -e "'* )
+  if [ -n "\${SUCCESS_OUTPUT:-}" ] && grep -Eq 'desired state applied|verify.sh: PASSED' "\$SUCCESS_OUTPUT"; then echo premature >"$T/premature.log"; fi
+  [ -z "\${QUERY_ERROR:-}" ] || exit "\$QUERY_ERROR"
+  [ ! -e "$T/cache.present" ] || exit 42
+  ;;
 *" ps "*) echo '{"State":"running"}' ;;
-*"kcadm.sh create"*|*"kcadm.sh update"*) echo "\$*" | sed 's/.*kcadm.sh //' >>"$T/writes.log"; if [ -n "\${FAIL_WRITE:-}" ]; then exit 1; fi ;;
+*"kcadm.sh create"*|*"kcadm.sh update"*) echo "\$*" | sed 's/.*kcadm.sh //' >>"$T/writes.log"; if [ -n "\${FAIL_WRITE:-}" ]; then exit "\$FAIL_WRITE"; fi ;;
 esac
 cat >/dev/null 2>&1 </dev/null
 exit 0
 STUBEOF
 chmod +x "$KSTUB/docker"
+cat >"$KSTUB/rm" <<'STUBEOF'
+#!/usr/bin/env bash
+if [ -n "${FAIL_LOCAL_CLEANUP:-}" ] && [[ "${*: -1}" == "$TMPDIR/"* ]]; then exit 31; fi
+exec /bin/rm "$@"
+STUBEOF
+chmod +x "$KSTUB/rm"
+
 
 # Manifest: academy (absent live), workspace (present live), field (present live).
 MAN="$T/manifest.json"
@@ -48,6 +69,9 @@ setup() { # setup <live-list-json> <live-client-json>
 	: >"$T/argv.log"
 	: >"$T/writes.log"
 	: >"$T/leak.log"
+	: >"$T/premature.log"
+	: >"$T/unrelated-delete.log"
+	rm -f "$T/cache.present"
 }
 run_apply() { # run_apply <outfile> [args...]; env passes through
 	local out="$1"
@@ -55,6 +79,14 @@ run_apply() { # run_apply <outfile> [args...]; env passes through
 	PATH="$KSTUB:$PATH" MANIFEST="$MAN" KC_ADMIN_PASSWORD="$PW" CONFIG_ENV_FILE=/nonexistent SECRET_ENV_FILE=/nonexistent \
 		bash "$REPO_ROOT/bin/apply-clients.sh" "$@" >"$out" 2>&1
 }
+run_verify() { # Minimal valid builtin inventory isolates cleanup from shape policy.
+	PATH="$KSTUB:$PATH" MANIFEST="$T/cleanup-manifest.json" REALM_DESIRED="$T/cleanup-realm.json" \
+		KC_ADMIN_PASSWORD="$PW" CONFIG_ENV_FILE=/nonexistent SECRET_ENV_FILE=/nonexistent \
+		VERIFY_DISCOVERY=false VERIFY_ROLLOUT=false bash "$REPO_ROOT/bin/verify.sh" >"$1" 2>&1
+}
+printf '%s' '{"clients":[{"clientId":"account","class":"keycloak-builtin"}]}' >"$T/cleanup-manifest.json"
+printf '%s' '{}' >"$T/cleanup-realm.json"
+
 LIVE_LIST='[{"id":"u-ws","clientId":"dotmac-workspace","secret":"'$SEC'","attributes":{"client.secret.rotated":"'$ROT'"}},{"id":"u-fld","clientId":"io.dotmac.field"}]'
 LIVE_WS="$(jq --arg s "$SEC" --arg r "$ROT" '. + {secret:$s} | .attributes += {"client.secret.rotated":$r, "live.only.attr":"v-live-only"}' "$REPO_ROOT/realm/clients/dotmac-workspace.json")"
 
@@ -177,6 +209,89 @@ hasnt "verify output hides client secret" "$T/v1" "$SEC"
 if [ ! -s "$T/leak.log" ]; then ok "no temp file ever held the secret (verify)"; else bad "secret reached a temp file (verify)"; fi
 if [ -z "$(ls -A "$TMPD")" ]; then ok "verify left no temp files"; else bad "verify left temp files"; fi
 if grep -q 'kcadm.sh get clients' "$T/argv.log"; then ok "verify exercised the client reads"; else bad "verify never read clients"; fi
+
+section "cleanup is a success barrier"
+for script in apply verify; do
+	cleanup_run() {
+		if [ "$script" = apply ]; then
+			APPLY_ONLY=dotmac-academy run_apply "$T/cleanup-out"
+		else
+			run_verify "$T/cleanup-out"
+		fi
+	}
+	cleanup_setup() {
+		if [ "$script" = apply ]; then setup "$LIVE_LIST" "$LIVE_WS";
+		else setup '[{"id":"builtin","clientId":"account"}]' '{}'; fi
+	}
+	cleanup_setup
+	SUCCESS_OUTPUT="$T/cleanup-out" cleanup_run
+	expect "$script succeeds after confirmed absence" 0 $?
+	if [ ! -s "$T/premature.log" ]; then ok "$script success follows absence query"; else bad "$script reported success before cleanup"; fi
+	if [ ! -s "$T/unrelated-delete.log" ]; then ok "$script removes no unrelated directory"; else bad "$script removed an unrelated directory"; fi
+	has "$script queries only its own directory" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
+	for failure in FAIL_CLEANUP CACHE_REMAINS; do
+		cleanup_setup
+		export "$failure=1"
+		cleanup_run
+		rc=$?
+		unset "$failure"
+		expect "$script $failure fails closed" 1 "$rc"
+		has "$script cleanup failure is explicit" "$T/cleanup-out" 'cleanup unconfirmed'
+		hasnt "$script cleanup failure cannot pass" "$T/cleanup-out" 'verify.sh: PASSED'
+		hasnt "$script cleanup failure cannot claim applied" "$T/cleanup-out" 'desired state applied'
+		if [ -z "$(ls -A "$TMPD")" ]; then ok "$script remote failure still removes local work"; else bad "$script left local work"; fi
+	done
+	for query_rc in 1 2 125; do
+		cleanup_setup
+		QUERY_ERROR="$query_rc" cleanup_run
+		expect "$script query status $query_rc is not absence" 1 $?
+		hasnt "$script query error cannot pass" "$T/cleanup-out" 'verify.sh: PASSED'
+		hasnt "$script query error cannot claim applied" "$T/cleanup-out" 'desired state applied'
+	done
+	for invalid in /tmp/kcadm. /tmp/kcadm.X/../other /tmp/kcadm.X/child $'/tmp/kcadm.X\nother' $'/tmp/kcadm.X\n'; do
+		cleanup_setup
+		KCADM_DIR="$invalid" cleanup_run
+		expect "$script invalid directory refuses" 1 $?
+		hasnt "$script invalid directory never reaches login" "$T/argv.log" 'config credentials'
+		hasnt "$script invalid directory is never removed" "$T/argv.log" 'rm -rf'
+		if [ ! -s "$T/unrelated-delete.log" ]; then ok "$script invalid path leaves unrelated directories alone"; else bad "$script attempted unrelated deletion"; fi
+	done
+	cleanup_setup
+	FAIL_LOCAL_CLEANUP=1 cleanup_run
+	expect "$script local cleanup failure fails closed" 1 $?
+	has "$script local failure still attempts cache removal" "$T/argv.log" 'rm -rf /tmp/kcadm.TESTDIR'
+	has "$script local failure still confirms cache absence" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
+	rm -rf "$TMPD"/*
+	cleanup_setup
+	CANCEL_CLEANUP=TERM cleanup_run
+	expect "$script cancellation during cleanup fails closed" 143 $?
+	has "$script cancellation during cleanup still confirms absence" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
+	hasnt "$script cancellation during cleanup cannot pass" "$T/cleanup-out" 'verify.sh: PASSED'
+	hasnt "$script cancellation during cleanup cannot claim applied" "$T/cleanup-out" 'desired state applied'
+	for signal in TERM HUP INT; do
+		cleanup_setup
+		CANCEL_SIGNAL="$signal" cleanup_run
+		rc=$?
+		case "$signal" in TERM) expected=143 ;; HUP) expected=129 ;; INT) expected=130 ;; esac
+		expect "$script $signal cancellation status" "$expected" "$rc"
+		has "$script cancellation removes owned cache" "$T/argv.log" 'rm -rf /tmp/kcadm.TESTDIR'
+		has "$script cancellation confirms absence" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
+		hasnt "$script cancellation cannot pass" "$T/cleanup-out" 'verify.sh: PASSED'
+		hasnt "$script cancellation cannot claim applied" "$T/cleanup-out" 'desired state applied'
+	done
+done
+setup '[{"id":"unexpected","clientId":"unexpected"}]' '{}'
+FAIL_CLEANUP=1 run_verify "$T/verify-failure-cleanup"
+expect "verify assertion failure survives cleanup failure" 1 $?
+hasnt "verify assertion and cleanup failure cannot pass" "$T/verify-failure-cleanup" 'verify.sh: PASSED'
+setup "$LIVE_LIST" "$LIVE_WS"
+FAIL_WRITE=17 FAIL_CLEANUP=1 APPLY_ONLY=dotmac-academy run_apply "$T/failed-write-cleanup"
+expect "write failure status survives cleanup failure" 17 $?
+expect "failed write is never retried" 1 "$(wc -l <"$T/writes.log" | tr -d ' ')"
+has "write and cleanup failure both reported" "$T/failed-write-cleanup" 'cleanup unconfirmed'
+setup "$LIVE_LIST" "$LIVE_WS"
+FAIL_CLEANUP=1 run_apply "$T/refusal-cleanup"
+expect "existing refusal status survives cleanup failure" 3 $?
 
 echo
 echo "t-kcadm: $pass passed, $failn failed"

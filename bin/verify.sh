@@ -29,7 +29,7 @@
 #                     it when --password is omitted) and passed to the container by
 #                     NAME only, so it is on no argv. The kcadm login cache lives in
 #                     a per-run mktemp directory in the container and that exact
-#                     path is removed on exit (best effort); client reads have
+#                     path is removed and its absence confirmed on exit; client reads have
 #                     .secret and attributes["client.secret.rotated"] stripped at
 #                     capture.
 #   KC_ISSUER         the PERMANENT issuer    (https://idp.dotmac.io/realms/dotmac)
@@ -87,24 +87,55 @@ fail() {
 }
 ok() { printf 'ok    %s\n' "$*"; }
 
-work="$(mktemp -d)"
-# Same verdict, now also cleaning up. Replacing the trap rather than adding a
-# second one, because bash keeps only the last EXIT trap.
+work=""
 kc_dir=""
 kc_cfg=""
-# Best effort, however this script exits: `kcadm config credentials` (password
-# mode) leaves a master-admin token cache in the container. Each run keeps it in
-# its OWN mktemp directory (passed as --config) and removes exactly that path, so
-# concurrent runs cannot delete each other's login.
+# Only a single basename returned by our fixed mktemp template is owned. Never
+# use an unvalidated response as either a cache path or a recursive-remove path.
+valid_kc_dir() { [[ "$1" =~ ^/tmp/kcadm\.[[:alnum:]]+$ ]]; }
 cleanup() {
-	rm -rf "$work"
-	if [ -n "$kc_dir" ]; then
-		dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1 || true
+	local rc=$? cleanup_failed=0
+	trap - EXIT
+	# A signal during cleanup still changes a successful result to cancellation,
+	# but does not interrupt either independent cleanup attempt.
+	trap 'if [ "$rc" -eq 0 ]; then rc=130; fi' INT
+	trap 'if [ "$rc" -eq 0 ]; then rc=143; fi' TERM
+	trap 'if [ "$rc" -eq 0 ]; then rc=129; fi' HUP
+	if [ -n "$work" ]; then
+		if ! rm -rf -- "$work"; then cleanup_failed=1; fi
+		if [ -e "$work" ] || [ -L "$work" ]; then cleanup_failed=1; fi
 	fi
+	if [ -n "$kc_dir" ]; then
+		if ! valid_kc_dir "$kc_dir"; then
+			cleanup_failed=1
+		else
+			if ! dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+			# Translate test's 1 (absent) into remote success. An exec/transport
+			# failure, including status 1, must never count as absence evidence.
+			if ! dc exec -T "$KC_SERVICE" sh -c '
+				test -e "$1"
+				rc=$?
+				case "$rc" in 1) ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+				test -L "$1"
+				rc=$?
+				case "$rc" in 1) exit 0 ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+			' sh "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+		fi
+	fi
+	if [ "$cleanup_failed" -ne 0 ]; then
+		echo "verify.sh: cleanup unconfirmed; private temporary data may remain" >&2
+		if [ "$rc" -eq 0 ]; then rc=1; fi
+	fi
+	if [ "$rc" -ne 0 ]; then verdict="FAILED"; fi
 	echo
 	echo "verify.sh: $verdict"
+	exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+work="$(mktemp -d)"
 
 # Compose must be able to interpolate `${KC_DB_NAME:?}` and friends even when
 # this script is run on its own (e.g. `make verify`), not only as a step inside
@@ -149,8 +180,10 @@ kc_login() {
 			curl -fsS --data-binary @- "$KC_INTERNAL_URL/realms/$KC_ADMIN_REALM/protocol/openid-connect/token" | jq -r '.access_token // empty')"
 		[ -n "$KC_BEARER_JWT" ]
 	else
-		kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null)" || { kc_dir=""; return 1; }
-		case "$kc_dir" in /tmp/kcadm.?*) ;; *) kc_dir=""; return 1 ;; esac
+		kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null && printf .)" || { local rc=$?; kc_dir=""; return "$rc"; }
+		kc_dir="${kc_dir%.}"
+		kc_dir="${kc_dir%$'\n'}"
+		if ! valid_kc_dir "$kc_dir"; then kc_dir=""; return 1; fi
 		kc_cfg="$kc_dir/kcadm.config"
 		dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
 			/opt/keycloak/bin/kcadm.sh config credentials \

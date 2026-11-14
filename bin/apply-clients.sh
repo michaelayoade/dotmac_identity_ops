@@ -148,22 +148,66 @@ stage() { # stage <local-file> <in-container-path>
 # on no argv. kcadm reads KC_CLI_PASSWORD when --password is omitted.
 export KC_CLI_PASSWORD="$KC_ADMIN_PASSWORD"
 
-work="$(mktemp -d)"
+apply_complete=false
+work=""
 kc_dir=""
 kc_cfg=""
-# Best effort, however this script exits: remove THIS run's private directory in
-# the container (login cache + staged files, including after a failed create or
-# update). Exactly that path, never a shared one.
+# Only a single basename returned by our fixed mktemp template is owned. Never
+# use an unvalidated response as either a cache path or a recursive-remove path.
+valid_kc_dir() { [[ "$1" =~ ^/tmp/kcadm\.[[:alnum:]]+$ ]]; }
 cleanup() {
-	rm -rf "$work"
-	if [ -n "$kc_dir" ]; then
-		dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1 || true
+	local rc=$? cleanup_failed=0
+	trap - EXIT
+	# A signal during cleanup still changes a successful result to cancellation,
+	# but does not interrupt either independent cleanup attempt.
+	trap 'if [ "$rc" -eq 0 ]; then rc=130; fi' INT
+	trap 'if [ "$rc" -eq 0 ]; then rc=143; fi' TERM
+	trap 'if [ "$rc" -eq 0 ]; then rc=129; fi' HUP
+	if [ -n "$work" ]; then
+		if ! rm -rf -- "$work"; then cleanup_failed=1; fi
+		if [ -e "$work" ] || [ -L "$work" ]; then cleanup_failed=1; fi
 	fi
+	if [ -n "$kc_dir" ]; then
+		if ! valid_kc_dir "$kc_dir"; then
+			cleanup_failed=1
+		else
+			if ! dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+			# Translate test's 1 (absent) into remote success. An exec/transport
+			# failure, including status 1, must never count as absence evidence.
+			if ! dc exec -T "$KC_SERVICE" sh -c '
+				test -e "$1"
+				rc=$?
+				case "$rc" in 1) ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+				test -L "$1"
+				rc=$?
+				case "$rc" in 1) exit 0 ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+			' sh "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+		fi
+	fi
+	if [ "$cleanup_failed" -ne 0 ]; then
+		echo "apply-clients: cleanup unconfirmed; private temporary data may remain" >&2
+		if [ "$rc" -eq 0 ]; then rc=1; fi
+	fi
+	if [ "$rc" -eq 0 ] && [ "$apply_complete" = true ]; then
+		echo "apply-clients: desired state applied. bin/verify.sh is what proves it took."
+	fi
+	exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+work="$(mktemp -d)"
 
-kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null)"
-case "$kc_dir" in /tmp/kcadm.?*) ;; *) echo "apply-clients: could not create a private kcadm directory in the container" >&2; kc_dir=""; exit 1 ;; esac
+kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null && printf .)" || { rc=$?; kc_dir=""; exit "$rc"; }
+# Preserve embedded/trailing newlines until validation; remove only mktemp's newline.
+kc_dir="${kc_dir%.}"
+kc_dir="${kc_dir%$'\n'}"
+if ! valid_kc_dir "$kc_dir"; then
+	echo "apply-clients: invalid private kcadm directory response" >&2
+	kc_dir=""
+	exit 1
+fi
 kc_cfg="$kc_dir/kcadm.config"
 
 dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
@@ -258,4 +302,4 @@ for p in ${plan[@]+"${plan[@]}"}; do
 	dc exec -T "$KC_SERVICE" rm -f "$staged" </dev/null || true
 done
 
-echo "apply-clients: desired state applied. bin/verify.sh is what proves it took."
+apply_complete=true
