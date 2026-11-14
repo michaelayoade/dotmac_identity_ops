@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -36,6 +37,47 @@ DEADLINE = time.monotonic() + 780
 
 class QualificationStop(BaseException):
     pass
+
+
+class CommandFailure(Exception):
+    def __init__(self, expected, observed):
+        super().__init__("command status mismatch")
+        self.expected = expected
+        self.observed = observed
+
+
+def safe_failure(error):
+    # Only these hardcoded categories and bounded integers may reach output.
+    # Never stringify the exception, its URL, command, body, args or traceback.
+    category, http_status, expected_rc, observed_rc = "other", "none", "none", "none"
+    if isinstance(error, urllib.error.HTTPError):
+        category = "http"
+        if type(error.code) is int and 100 <= error.code <= 599:
+            http_status = str(error.code)
+    elif isinstance(error, CommandFailure):
+        category = "command-status"
+        if type(error.expected) is int and -128 <= error.expected <= 255:
+            expected_rc = str(error.expected)
+        if type(error.observed) is int and -128 <= error.observed <= 255:
+            observed_rc = str(error.observed)
+    elif isinstance(error, QualificationStop):
+        category = "cancel-or-deadline"
+    elif isinstance(error, subprocess.TimeoutExpired):
+        category = "process-timeout"
+    elif isinstance(error, TimeoutError):
+        category = "transport-timeout"
+    elif isinstance(error, urllib.error.URLError):
+        category = "transport"
+    elif isinstance(error, json.JSONDecodeError):
+        category = "json"
+    elif isinstance(error, OSError):
+        category = "os"
+    elif isinstance(error, (ValueError, TypeError, KeyError)):
+        category = "document-shape"
+    elif isinstance(error, RuntimeError):
+        category = "assertion"
+    return ("; exception_kind=" + category + "; http_status=" + http_status
+            + "; expected_rc=" + expected_rc + "; observed_rc=" + observed_rc)
 
 
 def cancellation(_number, _frame):
@@ -160,7 +202,9 @@ def run(args, *, data=None, env=None, timeout=90, expected=0):
                             require(len(target) <= LIMIT)
     finally:
         stop_group(child)
-    require(child.returncode == expected)
+    if child.returncode != expected:
+        raise CommandFailure(expected, child.returncode)
+    require(True)
     return bytes(buffers["stdout"]), bytes(buffers["stderr"])
 
 
@@ -268,29 +312,36 @@ def qualify(kc, work):
             form = {"grant_type": "password", "client_id": "admin-cli",
                     "username": "qualification-admin"}
             form["pass" + "word"] = admin
+            STAGE = "bootstrap authentication"
             server.auth = json.loads(server.request("POST", "/realms/master/protocol/openid-connect/token",
                                                     form=form))["access_token"]
-            STAGE = "disposable realm seeding"
+            STAGE = "realm declaration load"
             desired = json.loads((ROOT / "realm/dotmac-realm.json").read_text())
             desired = {k: v for k, v in desired.items() if not k.startswith("_")}
+            STAGE = "realm creation"
             server.json("POST", "/admin/realms", desired)
             realm = urllib.parse.quote(desired["realm"], safe="")
             endpoint = "/admin/realms/" + realm
+            STAGE = "manifest declaration load"
             manifest = json.loads((ROOT / "realm/expected-clients.json").read_text())
             governed = [entry for entry in manifest["clients"] if entry["class"] != "keycloak-builtin"]
-            for entry in governed:
+            require(0 < len(governed) <= 32)
+            for index, entry in enumerate(governed, 1):
+                STAGE = "client declaration load index=" + str(index)
                 client = json.loads((ROOT / entry["desired_state_file"]).read_text())
                 if client["publicClient"] is False:
                     client["secret"] = canaries[0]
                     client["attributes"]["client.secret.rotated"] = canaries[1]
                 client["attributes"]["saml.signing.private.key"] = canaries[2]
                 client["attributes"]["qualification.unknown"] = canaries[3]
+                STAGE = "client creation index=" + str(index)
                 server.json("POST", endpoint + "/clients", client)
-            STAGE = "raw HTTP masking controls"
+            STAGE = "bearer control creation"
             # A real bearer-only DTO exercises the other ordinary DTO branch.
             server.json("POST", endpoint + "/clients", {
                 "clientId": "synthetic-bearer", "protocol": "openid-connect",
                 "publicClient": False, "bearerOnly": True})
+            STAGE = "raw HTTP masking controls"
             ordinary = server.request("GET", endpoint + "/clients")
             unsafe = json.loads(ordinary)
             require(all(value.encode() in ordinary for value in canaries))
@@ -409,8 +460,8 @@ if __name__ == "__main__":
             main()
         finally:
             cleanup()
-    except BaseException:
+    except BaseException as error:
         # Never interpolate exception text: it may contain a response/command.
         print("native masked export qualification failed; stage=" + STAGE
-              + "; completed_checks=" + str(CHECKS), file=sys.stderr)
+              + "; completed_checks=" + str(CHECKS) + safe_failure(error), file=sys.stderr)
         sys.exit(1)

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Source after kcadm() is defined. The only raw response path is this pipe from
 # Keycloak's server-masked export into an isolated, bounded JSON projection.
+set -euo pipefail
 kcadm_snapshot() { # <projected-output-file> [realm]
 	local output="$1" realm="${2:-$KC_REALM}"
 	if ! (

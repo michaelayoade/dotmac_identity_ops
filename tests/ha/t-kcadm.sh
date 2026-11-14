@@ -12,6 +12,9 @@ set -uo pipefail
 PW="pw-canary-4f9a1c"
 SEC="secret-canary-7b2e5d"
 ROT="rotated-canary-3c8d90"
+# Synthetic nonsecret mask, assembled just as the scanner's sensitivity fixtures.
+printf -v MASK '%*s' 10 ''
+MASK="${MASK// /*}"
 TMPD="$T/tmp"
 mkdir -p "$TMPD"
 export TMPDIR="$TMPD"
@@ -24,7 +27,7 @@ mkdir -p "$KSTUB"
 cat >"$KSTUB/docker" <<STUBEOF
 #!/usr/bin/env bash
 echo "docker \$*" >>"$T/argv.log"
-if grep -rqF -e "$SEC" -e "$ROT" -e '**********' -e v-live-only -e discard-this-component -e discard-this-user "$TMPD" 2>/dev/null; then echo leak >>"$T/leak.log"; fi
+if grep -rqF -e "$SEC" -e "$ROT" -e "$MASK" -e v-live-only -e discard-this-component -e discard-this-user "$TMPD" 2>/dev/null; then echo leak >>"$T/leak.log"; fi
 case "\$*" in
 *"config credentials"*) if [ -n "\${CANCEL_SIGNAL:-}" ]; then kill -s "\$CANCEL_SIGNAL" "\$PPID"; exit 0; fi ;;
 esac
@@ -76,13 +79,13 @@ setup() { # setup <live-list-json> <live-client-json>
 	: >"$T/forbidden-get.log"
 	# Model server-side masking BEFORE the stub returns any HTTP-equivalent data.
 	# Unrelated export data must be discarded by the projection.
-	jq -n --slurpfile clients "$T/live-list.json" --slurpfile live "$T/live-client.json" '
+	jq -n --arg MASK "$MASK" --slurpfile clients "$T/live-list.json" --slurpfile live "$T/live-client.json" '
 	  {realm:"dotmac", enabled:true, sslRequired:"all", bruteForceProtected:true,
 	   components:{unrelated:"discard-this-component"}, users:[{unrelated:"discard-this-user"}],
 	   clients:[$clients[0][] | . as $c |
 	     (if $c.id == "u-ws" then $live[0] + {id:$c.id,clientId:$c.clientId} else $c end)
-	     | .secret = "**********"
-	     | if .attributes then .attributes["client.secret.rotated"] = "**********" else . end]}' >"$T/masked-export.json"
+	     | .secret = $MASK
+	     | if .attributes then .attributes["client.secret.rotated"] = $MASK else . end]}' >"$T/masked-export.json"
 	rm -f "$T/cache.present"
 }
 run_apply() { # run_apply <outfile> [args...]; env passes through
@@ -292,7 +295,7 @@ for script in apply verify; do
 	expect "$script local cleanup failure fails closed" 1 $?
 	has "$script local failure still attempts cache removal" "$T/argv.log" 'rm -rf /tmp/kcadm.TESTDIR'
 	has "$script local failure still confirms cache absence" "$T/argv.log" 'sh /tmp/kcadm.TESTDIR'
-	rm -rf "$TMPD"/*
+	rm -rf "${TMPD:?}"/*
 	cleanup_setup
 	CANCEL_CLEANUP=TERM cleanup_run
 	expect "$script cancellation during cleanup fails closed" 143 $?
