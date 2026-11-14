@@ -77,8 +77,20 @@ def safe_failure(error):
         category = "document-shape"
     elif isinstance(error, RuntimeError):
         category = "assertion"
+    own_lines = []
+    frame = error.__traceback__
+    # Inspect at most 64 frames and emit at most 16 numeric line numbers from
+    # this file only. No frame paths, names, source, locals or values are read out.
+    for _index in range(64):
+        if frame is None or len(own_lines) == 16:
+            break
+        if (frame.tb_frame.f_code.co_filename == __file__
+                and type(frame.tb_lineno) is int and 1 <= frame.tb_lineno <= 10000000):
+            own_lines.append(frame.tb_lineno)
+        frame = frame.tb_next
     return ("; exception_kind=" + category + "; http_status=" + http_status
-            + "; expected_rc=" + expected_rc + "; observed_rc=" + observed_rc)
+            + "; expected_rc=" + expected_rc + "; observed_rc=" + observed_rc
+            + "; own_source_lines=" + json.dumps(own_lines, separators=(",", ":")))
 
 
 def cancellation(_number, _frame):
