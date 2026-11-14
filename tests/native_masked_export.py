@@ -47,10 +47,29 @@ class CommandFailure(Exception):
         self.observed = observed
 
 
+class AttributeMismatch(Exception):
+    def __init__(self, client_index, attribute_index, present, actual_type, expected_type):
+        super().__init__("declared attribute mismatch")
+        self.client_index = client_index
+        self.attribute_index = attribute_index
+        self.present = present
+        self.actual_type = actual_type
+        self.expected_type = expected_type
+
+
+def type_category(value):
+    for kind, label in ((str, "string"), (bool, "boolean"), (int, "number"),
+                        (float, "number"), (list, "array"), (dict, "object")):
+        if type(value) is kind:
+            return label
+    return "null" if value is None else "other"
+
+
 def safe_failure(error):
     # Only these hardcoded categories and bounded integers may reach output.
     # Never stringify the exception, its URL, command, body, args or traceback.
     category, http_status, expected_rc, observed_rc = "other", "none", "none", "none"
+    attribute_info = ""
     if isinstance(error, urllib.error.HTTPError):
         category = "http"
         if type(error.code) is int and 100 <= error.code <= 599:
@@ -61,6 +80,18 @@ def safe_failure(error):
             expected_rc = str(error.expected)
         if type(error.observed) is int and -128 <= error.observed <= 255:
             observed_rc = str(error.observed)
+    elif isinstance(error, AttributeMismatch):
+        category = "declared-attribute"
+        if (type(error.client_index) is int and 1 <= error.client_index <= 32
+                and type(error.attribute_index) is int and 1 <= error.attribute_index <= 32
+                and type(error.present) is bool
+                and error.actual_type in {"string", "boolean", "number", "array", "object", "null", "other"}
+                and error.expected_type in {"string", "boolean", "number", "array", "object", "null", "other"}):
+            attribute_info = ("; client_index=" + str(error.client_index)
+                              + "; attribute_index=" + str(error.attribute_index)
+                              + "; attribute_present=" + str(error.present).lower()
+                              + "; actual_type=" + error.actual_type
+                              + "; expected_type=" + error.expected_type)
     elif isinstance(error, QualificationStop):
         category = "cancel-or-deadline"
     elif isinstance(error, subprocess.TimeoutExpired):
@@ -90,7 +121,8 @@ def safe_failure(error):
         frame = frame.tb_next
     return ("; exception_kind=" + category + "; http_status=" + http_status
             + "; expected_rc=" + expected_rc + "; observed_rc=" + observed_rc
-            + "; own_source_lines=" + json.dumps(own_lines, separators=(",", ":")))
+            + "; own_source_lines=" + json.dumps(own_lines, separators=(",", ":"))
+            + attribute_info)
 
 
 def cancellation(_number, _frame):
@@ -422,14 +454,27 @@ cat "$PROJECTED_FILE"
             require(projected["schemaVersion"] == 1 and projected["realm"] == desired)
             by_id = {client["clientId"]: client for client in projected["clients"]}
             raw_by_id = {client["clientId"]: client for client in exported["clients"]}
-            for entry in governed:
+            for client_index, entry in enumerate(governed, 1):
                 client = by_id[entry["clientId"]]
                 require(isinstance(client["attributes"], dict))
                 require(client["attributes"]["pkce.code.challenge.method"] == "S256")
                 require(raw_by_id[entry["clientId"]]["attributes"]["pkce.code.challenge.method"] == "S256")
                 declared_attrs = json.loads((ROOT / entry["desired_state_file"]).read_text())["attributes"]
-                require(all(client["attributes"].get(key) == value
-                            for key, value in declared_attrs.items()))
+                require(len(declared_attrs) <= 32)
+                for attribute_index, key in enumerate(sorted(declared_attrs), 1):
+                    value = declared_attrs[key]
+                    actual = client["attributes"].get(key)
+                    # Existing reconciliation treats this optional empty
+                    # declaration as equivalent to the API omitting the field.
+                    # Required attributes (especially PKCE) get no such default.
+                    optional_empty = (key == "post.logout.redirect.uris"
+                                      and value == "" and actual is None)
+                    matches = key in client["attributes"] and actual == value
+                    if not (matches or optional_empty):
+                        raise AttributeMismatch(client_index, attribute_index,
+                                                key in client["attributes"],
+                                                type_category(actual), type_category(value))
+                    require(True)
                 require("qualification.unknown" not in client["attributes"])
                 require("qualification.unknown" in projected["attributeNames"][client["id"]])
                 require(client["secret"] == (None if client["publicClient"] is True

@@ -127,7 +127,7 @@
     {
       "clientId": "io.dotmac.field",
       "name": "Dotmac Field (native, pre-rollout)",
-      "description": "Public native OIDC client for the field_mobile artifact. DISABLED until a verified App Link and Universal Link exist (ADR-0069 §7 / R1) and the dotmac_sub ID-token exchange endpoint exists (ADR-0069 §3). The client id matches the Android application id and the iOS bundle id, because ADR-0069 §2 makes a client per ARTIFACT identity.",
+      "description": "Public native OIDC client for Dotmac Field. Disabled until verified App/Universal Links and the Sub token-exchange gate are complete (ADR-0069 sections 3 and 7). No redirects are registered before rollout.",
       "protocol": "openid-connect",
       "enabled": false,
       "publicClient": true,
@@ -151,7 +151,7 @@
     {
       "clientId": "dotmac-workspace",
       "name": "Dotmac Workspace",
-      "description": "Confidential server-side relying party for workspace.dotmac.io. Its security model rests on a server-held secret, an HttpOnly cookie and a server-side single-use state store, which is exactly why ADR-0069 §4 refuses to ship this client class to a device. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md.",
+      "description": "Confidential server-side OIDC client for Dotmac Workspace. Uses Authorization Code with S256 PKCE, server-held state and cookies. Its secret is managed outside this repository.",
       "protocol": "openid-connect",
       "enabled": true,
       "publicClient": false,
@@ -174,7 +174,7 @@
     {
       "clientId": "dotmac-academy",
       "name": "Dotmac Academy",
-      "description": "Confidential server-side relying party for academy.dotmac.io staff sign-in (pilot cohort). Same security model as dotmac-workspace: a server-held secret, an HttpOnly cookie and a server-side single-use state store. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md. Declared disabled until the Academy OIDC build is deployed with its secret delivered; see the rollout gate in realm/expected-clients.json.",
+      "description": "Confidential OIDC client for Dotmac Academy staff. Staged disabled; enable only for the approved login pilot after secret delivery. Uses Authorization Code with S256 PKCE. Secrets are managed outside this repository.",
       "protocol": "openid-connect",
       "enabled": false,
       "publicClient": false,
