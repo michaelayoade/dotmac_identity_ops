@@ -69,25 +69,36 @@ admin account was confirmed persisted. Do not reintroduce them.
 ## The admin password and `kcadm`
 
 `bin/verify.sh` and `bin/apply-clients.sh` need `KC_ADMIN_PASSWORD` in the
-environment. Each script exports it as `KCADM_PASSWORD` and passes it to the
-container by **name only** (`docker compose exec -e KCADM_PASSWORD`). Docker
-reads the value from the script's own environment, so it is never an argument
-on the **host's** command line and is not visible to `ps` or auditd there; it
-is also in no log and no file. (The value is, as for any process, readable by
-root and by the same user via `/proc/<pid>/environ`.)
+environment. Each script exports it as `KC_CLI_PASSWORD` (Keycloak's `kcadm.sh`
+reads that variable when `--password` is omitted) and passes it to the
+container by **name only**: `docker compose exec -e KC_CLI_PASSWORD ...
+kcadm.sh config credentials --server ... --realm ... --user ...`, with no
+`--password` argument and no `sh -c` wrapper. The value is therefore on no
+command line, neither the host's (`ps`, auditd) nor the container's process
+table, and is in no log and no file. (As for any process, it is readable by
+root and by the same user through `/proc/<pid>/environ`.) A test asserts that
+neither `--password` nor the value appears in any recorded argv.
 
 Client reads (`get clients`, `get clients/<uuid>`) include every confidential
-client's `secret`. Both scripts strip `.secret` with `jq` as the data is
-captured, before it reaches any temp file, and the apply dry-run diff never
-prints it. `kcadm config credentials` also leaves a master-admin token cache in
-the container (`~/.keycloak/kcadm.config`); both scripts remove it in their
-`EXIT` trap, as best effort.
+client's `secret`, and Keycloak does not strip `attributes["client.secret.rotated"]`
+either. Both scripts remove both with `jq` as the data is captured, before it
+reaches any temp file, and the apply dry-run diff compares declared keys only
+(live-only attribute keys are listed by name, never value).
 
-**Stated honestly:** `kcadm.sh` accepts the password only as a command-line
-argument, so for the duration of the `config credentials` call it is visible in
-the *container's own* process table. There is no `--password-stdin`. This is a
-residual, it is named rather than hidden, and it is bounded to a process that
-already holds the credential.
+`kcadm config credentials` leaves a master-admin token cache. Each run keeps it
+in its own `mktemp -d` directory inside the container (passed as `--config` on
+every kcadm call, staged desired-state files live there too) and removes exactly
+that directory in its `EXIT` trap, as best effort. Concurrent runs therefore
+cannot delete each other's login.
+
+**Residuals, named rather than hidden:**
+
+- Passing the password by name relies on compose resolving a bare `-e NAME` from
+  the host environment. If it does not, the login fails closed (no credential
+  reaches kcadm). The first live run proves it.
+- In `KC_ADMIN_AUTH=client` mode, `bin/verify.sh` still puts a short-lived bearer
+  token on the host's argv (`--token`). This predates this change and is left as
+  a follow-up.
 
 Both scripts refuse to run under `set -x`: a traced run would put the credential
 into the trace output, which is the one place nobody thinks to check.

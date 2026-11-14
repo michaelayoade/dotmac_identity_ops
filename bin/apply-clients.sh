@@ -6,27 +6,40 @@
 # is a decision with a blast radius, so an unknown client is REPORTED by the
 # inventory policy and removed by a human, not silently reaped by a script.
 #
-# `kcadm update -f` sends the declared representation, not a field-level merge,
-# so a declared file that has drifted from the live realm OVERWRITES live
-# settings. Therefore updating an existing client is opt-in and can be scoped:
+# Keycloak merges top-level fields and `attributes` key by key on update, so
+# keys this repository does not declare are left alone. But every key it DOES
+# declare is overwritten with the declared value, so a declared file that has
+# drifted from the live realm (redirectUris, webOrigins, fullScopeAllowed, the
+# PKCE attribute, post-logout URIs) silently changes live settings. Therefore
+# updating an existing client is opt-in and can be scoped:
 #
 # Knobs: as bin/verify.sh, plus
 #   APPLY_DRY_RUN       print what would change, change nothing. Each would-UPDATE
 #                       prints a field-level diff (declared keys vs the live value
-#                       of the same keys; the `secret` field is never read into the
-#                       comparison or printed)                          (false)
+#                       of the same keys; arrays compared sorted, an empty-string
+#                       attribute equals an absent one; live-only attribute keys
+#                       are listed by NAME only). `secret` and
+#                       attributes["client.secret.rotated"] are removed at capture
+#                       and never compared or printed)                  (false)
 #   APPLY_ONLY          comma-separated clientIds. Clients not listed get no create
 #                       and no update. A name that is not an applicable client in
 #                       the manifest is refused (exit 2). Empty = all   ()
-#   --only <clientId>   CLI form of APPLY_ONLY; repeatable, adds to it
+#   --only <clientId>   CLI form of APPLY_ONLY; repeatable. If given at all it
+#                       REPLACES any APPLY_ONLY from the environment
 #   APPLY_ALLOW_UPDATE  must be `true` for ANY update of an existing client. Without
 #                       it a run that would update refuses (exit 3) BEFORE writing
-#                       anything. Creating missing clients needs no opt-in.  (false)
+#                       anything. Creating missing clients needs no opt-in. Setting
+#                       it to true REQUIRES APPLY_ONLY/--only (else exit 2).  (false)
 #
-# The admin password is exported as KCADM_PASSWORD and passed to the container by
-# NAME only (`-e KCADM_PASSWORD`), so it is never in the host's argv. The kcadm
-# login cache in the container is removed on exit (best effort). Client reads have
-# `.secret` stripped before they reach any temp file.
+# The resolved client list is printed before anything is done.
+#
+# The admin password is exported as KC_CLI_PASSWORD (which kcadm reads when
+# --password is omitted) and passed to the container by NAME only
+# (`-e KC_CLI_PASSWORD`), so it is on no argv, host or container. Each run uses
+# its own kcadm login cache and staging directory inside the container (a
+# mktemp -d, passed as `--config`), removed exactly on exit, so concurrent runs
+# cannot delete each other's login. Client reads have `.secret` and
+# attributes["client.secret.rotated"] stripped before any temp file.
 
 set -euo pipefail
 
@@ -48,10 +61,13 @@ APPLY_DRY_RUN="${APPLY_DRY_RUN:-false}"
 APPLY_ONLY="${APPLY_ONLY:-}"
 APPLY_ALLOW_UPDATE="${APPLY_ALLOW_UPDATE:-false}"
 
+cli_only=false
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 	--only)
 		[ "$#" -ge 2 ] && [ -n "$2" ] || { echo "apply-clients.sh: --only needs a clientId" >&2; exit 2; }
+		# The CLI replaces the environment's APPLY_ONLY (once), then accumulates.
+		if [ "$cli_only" = false ]; then APPLY_ONLY=""; cli_only=true; fi
 		APPLY_ONLY="${APPLY_ONLY:+$APPLY_ONLY,}$2"
 		shift 2
 		;;
@@ -82,6 +98,15 @@ if [ -n "$APPLY_ONLY" ]; then
 		fi
 	done
 fi
+if [ "$APPLY_ALLOW_UPDATE" = "true" ] && [ "${#only_list[@]}" -eq 0 ]; then
+	echo "apply-clients.sh: APPLY_ALLOW_UPDATE=true requires APPLY_ONLY (or --only); refusing to update without a scope" >&2
+	exit 2
+fi
+if [ "${#only_list[@]}" -eq 0 ]; then
+	echo "apply-clients: scope: all applicable clients in the manifest: $(jq -r '[.clients[] | select(.class != "keycloak-builtin") | .clientId] | join(",")' "$MANIFEST")"
+else
+	echo "apply-clients: scope: $(IFS=,; echo "${only_list[*]}")"
+fi
 selected() { # selected <clientId>
 	[ "${#only_list[@]}" -eq 0 ] && return 0
 	local n
@@ -111,8 +136,8 @@ dc() {
 # redirects `</dev/null` would otherwise silently swallow the JSON, and kcadm
 # would apply an empty body.
 kcadm() {
-	dc exec -T -e KCADM_PASSWORD "$KC_SERVICE" \
-		/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+	dc exec -T "$KC_SERVICE" \
+		/opt/keycloak/bin/kcadm.sh "$@" --config "$kc_cfg" </dev/null
 }
 
 stage() { # stage <local-file> <in-container-path>
@@ -120,29 +145,33 @@ stage() { # stage <local-file> <in-container-path>
 }
 
 # By NAME only: docker reads the value from this process's environment, so it is
-# never an argument visible to ps/auditd on the host.
-export KCADM_PASSWORD="$KC_ADMIN_PASSWORD"
+# on no argv. kcadm reads KC_CLI_PASSWORD when --password is omitted.
+export KC_CLI_PASSWORD="$KC_ADMIN_PASSWORD"
 
 work="$(mktemp -d)"
-logged_in=false
-# Best effort: `kcadm config credentials` leaves a master-admin token cache in
-# the container; remove it however this script exits.
+kc_dir=""
+kc_cfg=""
+# Best effort, however this script exits: remove THIS run's private directory in
+# the container (login cache + staged files, including after a failed create or
+# update). Exactly that path, never a shared one.
 cleanup() {
 	rm -rf "$work"
-	if [ "$logged_in" = true ]; then
-		dc exec -T "$KC_SERVICE" sh -c 'rm -f "$HOME/.keycloak/kcadm.config"' </dev/null >/dev/null 2>&1 || true
+	if [ -n "$kc_dir" ]; then
+		dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1 || true
 	fi
 }
 trap cleanup EXIT
 
-logged_in=true
-dc exec -T -e KCADM_PASSWORD "$KC_SERVICE" \
-	sh -c '/opt/keycloak/bin/kcadm.sh config credentials --server "$0" --realm "$1" --user "$2" --password "$KCADM_PASSWORD" >/dev/null' \
-	"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
+kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null)"
+case "$kc_dir" in /tmp/kcadm.?*) ;; *) echo "apply-clients: could not create a private kcadm directory in the container" >&2; kc_dir=""; exit 1 ;; esac
+kc_cfg="$kc_dir/kcadm.config"
+
+dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
+	/opt/keycloak/bin/kcadm.sh config credentials --server "$KC_INTERNAL_URL" --realm "$KC_ADMIN_REALM" --user "$KC_ADMIN_USER" --config "$kc_cfg" >/dev/null </dev/null
 
 # Only ids and names are needed from the list; .secret is stripped as it is
 # captured, before anything is written to disk.
-kcadm get clients -r "$KC_REALM" --fields id,clientId | jq 'map(del(.secret))' >"$work/clients.json"
+kcadm get clients -r "$KC_REALM" --fields id,clientId | jq 'map(del(.secret) | del(.attributes["client.secret.rotated"]))' >"$work/clients.json"
 
 # Pass 1: plan. Nothing is written here.
 plan=()
@@ -171,26 +200,35 @@ if [ "$n_update" -gt 0 ] && [ "$APPLY_ALLOW_UPDATE" != "true" ] && [ "$APPLY_DRY
 	exit 3
 fi
 
-# Field-level diff: declared keys vs the live value of the same keys. The live
-# representation has .secret stripped at capture; declared .secret (there should
-# be none) is dropped too. Prints key names and non-secret values only.
+# Field-level diff: declared keys vs the live value of the same keys, attributes
+# key by key. Arrays are compared sorted; an empty-string declared attribute
+# equals an absent live one. .secret and attributes["client.secret.rotated"] are
+# stripped at capture (and from the declared side). Live-only attribute keys are
+# listed by NAME only, never by value.
 show_diff() { # show_diff <client_id> <uuid> <declared-file> (client_id is for the caller's log only)
 	local uuid="$2"
-	kcadm get "clients/$uuid" -r "$KC_REALM" | jq 'del(.secret)' >"$work/live.json"
-	local out
+	kcadm get "clients/$uuid" -r "$KC_REALM" |
+		jq 'del(.secret) | del(.attributes["client.secret.rotated"])' >"$work/live.json"
+	local out names
 	out="$(jq -r --slurpfile live "$work/live.json" '
-		(del(.secret)) as $d | $live[0] as $l
-		| [ $d | to_entries[] | select(.value != $l[.key])
-		    | "    \(.key): declared=\(.value | tojson) live=\($l[.key] | tojson)"
-		    + (if .key == "attributes" and ((.value | type) == "object") and (($l[.key] | type) == "object")
-		       then "\n      live-only attribute keys (dropped if the update replaces attributes): \([ $l[.key] | keys[] | select(. as $k | ($d.attributes | has($k)) | not) ] | tojson)"
-		       else "" end) ]
+		def norm: walk(if type == "array" then sort else . end);
+		(del(.secret) | del(.attributes["client.secret.rotated"])) as $d | $live[0] as $l
+		| ( [ $d | to_entries[] | select(.key != "attributes")
+		      | select((.value | norm) != ($l[.key] | norm))
+		      | "    \(.key): declared=\(.value | tojson) live=\($l[.key] | tojson)" ]
+		  + [ ($d.attributes // {}) | to_entries[] | . as $e | (($l.attributes // {})[$e.key]) as $lv
+		      | select(((($e.value | norm) != ($lv | norm))) and (($e.value == "" and $lv == null) | not))
+		      | "    attributes.\($e.key): declared=\($e.value | tojson) live=\($lv | tojson)" ] )
 		| .[]' "$3")"
+	names="$(jq -r --slurpfile live "$work/live.json" '
+		(del(.secret) | del(.attributes["client.secret.rotated"])) as $d | $live[0] as $l
+		| [ ($l.attributes // {}) | keys[] | select(. as $k | (($d.attributes // {}) | has($k)) | not) ] | join(", ")' "$3")"
 	if [ -z "$out" ]; then
 		echo "    no change"
 	else
 		printf '%s\n' "$out"
 	fi
+	if [ -n "$names" ]; then echo "    live-only attribute keys (left alone, update merges per key): $names"; fi
 }
 
 # Pass 2: act.
@@ -208,7 +246,7 @@ for p in ${plan[@]+"${plan[@]}"}; do
 		continue
 	fi
 
-	staged="/tmp/dotmac-desired-$client_id.json"
+	staged="$kc_dir/desired-$client_id.json"
 	stage "$file" "$staged"
 	if [ "$action" = create ]; then
 		echo "creating $client_id"
@@ -217,7 +255,7 @@ for p in ${plan[@]+"${plan[@]}"}; do
 		echo "updating $client_id"
 		kcadm update "clients/$uuid" -r "$KC_REALM" -f "$staged"
 	fi
-	dc exec -T "$KC_SERVICE" rm -f "$staged" </dev/null
+	dc exec -T "$KC_SERVICE" rm -f "$staged" </dev/null || true
 done
 
 echo "apply-clients: desired state applied. bin/verify.sh is what proves it took."
