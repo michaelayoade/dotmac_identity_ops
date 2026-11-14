@@ -25,6 +25,13 @@
 #                     a REQUIRED operator input with no default and is not
 #                     recorded here; see docs/SECRETS.md. NEVER a literal in any
 #                     file.
+#                     In password mode it is exported as KC_CLI_PASSWORD (kcadm reads
+#                     it when --password is omitted) and passed to the container by
+#                     NAME only, so it is on no argv. The kcadm login cache lives in
+#                     a per-run mktemp directory in the container and that exact
+#                     path is removed on exit (best effort); client reads have
+#                     .secret and attributes["client.secret.rotated"] stripped at
+#                     capture.
 #   KC_ISSUER         the PERMANENT issuer    (https://idp.dotmac.io/realms/dotmac)
 #   KC_ADMIN_AUTH    password | client       (password). `client` logs kcadm in as a
 #                     service account: KC_ADMIN_USER is the client id and
@@ -83,7 +90,21 @@ ok() { printf 'ok    %s\n' "$*"; }
 work="$(mktemp -d)"
 # Same verdict, now also cleaning up. Replacing the trap rather than adding a
 # second one, because bash keeps only the last EXIT trap.
-trap 'rm -rf "$work"; echo; echo "verify.sh: $verdict"' EXIT
+kc_dir=""
+kc_cfg=""
+# Best effort, however this script exits: `kcadm config credentials` (password
+# mode) leaves a master-admin token cache in the container. Each run keeps it in
+# its OWN mktemp directory (passed as --config) and removes exactly that path, so
+# concurrent runs cannot delete each other's login.
+cleanup() {
+	rm -rf "$work"
+	if [ -n "$kc_dir" ]; then
+		dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1 || true
+	fi
+	echo
+	echo "verify.sh: $verdict"
+}
+trap cleanup EXIT
 
 # Compose must be able to interpolate `${KC_DB_NAME:?}` and friends even when
 # this script is run on its own (e.g. `make verify`), not only as a step inside
@@ -96,7 +117,7 @@ dc() {
 	local -a envs=()
 	if [ -r "$CONFIG_ENV_FILE" ]; then envs+=(--env-file "$CONFIG_ENV_FILE"); fi
 	if [ -r "$SECRET_ENV_FILE" ]; then envs+=(--env-file "$SECRET_ENV_FILE"); fi
-	docker compose "${envs[@]}" -p "$KC_COMPOSE_PROJECT" -f "$KC_COMPOSE_FILE" "$@"
+	docker compose ${envs[@]+"${envs[@]}"} -p "$KC_COMPOSE_PROJECT" -f "$KC_COMPOSE_FILE" "$@"
 }
 
 # Every `docker compose exec -T` redirects stdin from /dev/null. A script that
@@ -109,11 +130,15 @@ kcadm() {
 		dc exec -T "$KC_SERVICE" \
 			/opt/keycloak/bin/kcadm.sh "$@" --no-config --server "$KC_INTERNAL_URL" --token "$KC_BEARER_JWT" </dev/null
 	else
-		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-			/opt/keycloak/bin/kcadm.sh "$@" </dev/null
+		dc exec -T "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh "$@" --config "$kc_cfg" </dev/null
 	fi
 }
 KC_BEARER_JWT=""
+# Password mode: kcadm reads KC_CLI_PASSWORD when --password is omitted, and the
+# value is passed to the container by NAME only (`-e KC_CLI_PASSWORD`); docker
+# reads it from this process's environment, so it is on no argv.
+if [ "$KC_ADMIN_AUTH" = "password" ]; then export KC_CLI_PASSWORD="$KC_ADMIN_PASSWORD"; fi
 
 kc_login() {
 	if [ "$KC_ADMIN_AUTH" = "client" ]; then
@@ -124,10 +149,12 @@ kc_login() {
 			curl -fsS --data-binary @- "$KC_INTERNAL_URL/realms/$KC_ADMIN_REALM/protocol/openid-connect/token" | jq -r '.access_token // empty')"
 		[ -n "$KC_BEARER_JWT" ]
 	else
-		dc exec -T -e KCADM_PASSWORD="$KC_ADMIN_PASSWORD" "$KC_SERVICE" \
-			sh -c '/opt/keycloak/bin/kcadm.sh config credentials \
-			    --server "$0" --realm "$1" --user "$2" --password "$KCADM_PASSWORD" >/dev/null' \
-			"$KC_INTERNAL_URL" "$KC_ADMIN_REALM" "$KC_ADMIN_USER" </dev/null
+		kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null)" || { kc_dir=""; return 1; }
+		case "$kc_dir" in /tmp/kcadm.?*) ;; *) kc_dir=""; return 1 ;; esac
+		kc_cfg="$kc_dir/kcadm.config"
+		dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
+			/opt/keycloak/bin/kcadm.sh config credentials \
+			--server "$KC_INTERNAL_URL" --realm "$KC_ADMIN_REALM" --user "$KC_ADMIN_USER" --config "$kc_cfg" >/dev/null </dev/null
 	fi
 }
 
@@ -168,7 +195,8 @@ fi
 
 echo
 echo "== client inventory =="
-kcadm get clients -r "$KC_REALM" >"$work/clients.json" || fail "could not list clients"
+# `.secret` is stripped as the data is captured, before any temp file exists.
+{ kcadm get clients -r "$KC_REALM" | jq 'map(del(.secret) | del(.attributes["client.secret.rotated"]))' >"$work/clients.json"; } || fail "could not list clients"
 if [ -s "$work/clients.json" ]; then
 	if "$EVAL" realm "$MANIFEST" "$work/clients.json"; then
 		ok "the realm holds exactly the declared client inventory"
@@ -200,7 +228,7 @@ while IFS= read -r entry; do
 		fail "$client_id: not present in the realm"
 		continue
 	fi
-	kcadm get "clients/$uuid" -r "$KC_REALM" >"$work/client.json" || {
+	{ kcadm get "clients/$uuid" -r "$KC_REALM" | jq 'del(.secret) | del(.attributes["client.secret.rotated"])' >"$work/client.json"; } || {
 		fail "$client_id: could not read the full client representation"
 		continue
 	}
