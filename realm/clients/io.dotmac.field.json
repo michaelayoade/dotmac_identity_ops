@@ -1,7 +1,7 @@
 {
   "clientId": "io.dotmac.field",
   "name": "Dotmac Field (native, pre-rollout)",
-  "description": "Public native OIDC client for the field_mobile artifact. DISABLED until a verified App Link and Universal Link exist (ADR-0069 §7 / R1) and the dotmac_sub ID-token exchange endpoint exists (ADR-0069 §3). The client id matches the Android application id and the iOS bundle id, because ADR-0069 §2 makes a client per ARTIFACT identity.",
+  "description": "Public native OIDC client for Dotmac Field. Disabled until verified App/Universal Links and the Sub token-exchange gate are complete (ADR-0069 sections 3 and 7). No redirects are registered before rollout.",
   "protocol": "openid-connect",
   "enabled": false,
   "publicClient": true,

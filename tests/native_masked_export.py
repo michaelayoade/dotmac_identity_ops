@@ -4,6 +4,7 @@
 Never prints subprocess output, HTTP bodies, exception details, or server logs.
 Ordinary unmasked GETs below are synthetic sensitivity controls, never collectors.
 """
+import base64
 import copy
 import hashlib
 import json
@@ -281,12 +282,22 @@ def project(document, canaries):
 
 def qualify(kc, work):
     global STAGE
+    STAGE = "synthetic RSA canary generation"
+    # Keycloak 26.0.8 BCPemUtilsProvider decodes headerless Base64 DER through
+    # DerUtils' RSA PKCS8EncodedKeySpec. Convert explicitly to unencrypted
+    # PKCS#8, entirely through bounded in-memory subprocess pipes.
+    pem, _stderr = run(["openssl", "genpkey", "-algorithm", "RSA",
+                        "-pkeyopt", "rsa_keygen_bits:2048"], timeout=30)
+    der, _stderr = run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-outform", "DER"],
+                       data=pem, timeout=15)
+    require(1000 <= len(der) <= 4096)
     STAGE = "native startup"
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     admin = secrets.token_urlsafe(32)
     canaries = [secrets.token_urlsafe(40) for _ in range(4)]
+    canaries[2] = base64.b64encode(der).decode("ascii")
     env = {key: value for key, value in os.environ.items()
            if key in {"PATH", "JAVA_HOME", "HOME", "LANG", "TMPDIR"}}
     env.update({"KC_BOOTSTRAP_ADMIN_USERNAME": "qualification-admin",
@@ -373,9 +384,13 @@ def qualify(kc, work):
                          if c["clientId"] == governed[0]["clientId"])["secret"] is None)
             STAGE = "real kcadm shared helper"
             config = work / "synthetic-kcadm.config"
+            cli_env = dict(env)
+            cli_env["KC_CLI_PASSWORD"] = admin
+            # BaseConfigCredentialsCmd in 26.0.8 reads this environment name
+            # when --user is supplied and the password option is absent.
             run([str(kc / "bin/kcadm.sh"), "config", "credentials", "--config", str(config),
-                 "--server", server.base, "--realm", "master", "--user", "qualification-admin",
-                 "--password", admin], env=env)
+                 "--server", server.base, "--realm", "master", "--user", "qualification-admin"],
+                env=cli_env)
             projected_file = work / "projected.json"
             helper_env = dict(env, REPO_ROOT=str(ROOT), MANIFEST=str(ROOT / "realm/expected-clients.json"),
                               KC_REALM=desired["realm"], NATIVE_KCADM=str(kc / "bin/kcadm.sh"),

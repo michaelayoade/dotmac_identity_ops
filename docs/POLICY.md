@@ -167,3 +167,8 @@ Active and rotated client secrets are masked before HTTP transport. Other
 export configuration is discarded before persistence or output. This boundary
 does not claim that the export endpoint masks every possible private client
 attribute. See `docs/SECRETS.md` for the exact data boundary.
+
+Client descriptions are limited to 255 characters by the database changelogs
+shipped with Keycloak 26.0.8. Explanatory rationale belongs in this document and
+the desired-state manifest; the native qualification creates each declared
+client so an incompatible declaration cannot be accepted by stubs alone.
