@@ -47,7 +47,7 @@ nothing about the property under test.
 | Code | Assertion | Ground |
 |---|---|---|
 | `public` | `publicClient == true` | ADR-0069 § 4. A secret in a downloadable artifact is readable by anyone who downloads it |
-| `public-secret` | no `secret` field present | same |
+| `public-secret` | `secret` is absent or null in the policy representation | same |
 | `bearer-only` | `bearerOnly == false` | |
 | `flow-standard` | Authorization Code enabled | ADR-0069 § 2 |
 | `flow-implicit` | implicit **disabled** | § 4. Implicit returns tokens in a redirect the OS may log |
@@ -145,3 +145,30 @@ than exempt. These are unmonitored, and naming them is the point:
 5. **Everything on the live host that has not been reconciled yet.** The whole
    of `docs/HOST-IMPORT-TODO.md`. Until that document is deleted, this
    repository describes what the realm *must* look like and not what it *does*.
+
+## Live snapshot representation
+
+Apply planning and the live verifier share a projection of Keycloak's
+server-masked partial export. The verifier still grades the complete client
+inventory and every governed client through `bin/policy-eval.sh`, regardless
+of the apply selection. It preserves nested attributes, missing fields and
+false booleans; CLI field selection is not used to stand in for that evidence.
+Projection and cleanup failures prevent a passing verdict.
+
+Secret-field normalization follows Keycloak's ordinary representation: public
+or bearer-only clients have a null field, and confidential clients expose only
+a nonsecret presence indicator. The `public-secret` assertion still rejects an
+unsafe policy input. **Absence of a database-stored secret for a public client
+is unmonitored**; neither this representation nor ordinary client GET proves
+that property. No exemption from the existing client-type and flow assertions
+is introduced.
+
+Active and rotated client secrets are masked before HTTP transport. Other
+export configuration is discarded before persistence or output. This boundary
+does not claim that the export endpoint masks every possible private client
+attribute. See `docs/SECRETS.md` for the exact data boundary.
+
+Client descriptions are limited to 255 characters by the database changelogs
+shipped with Keycloak 26.0.8. Explanatory rationale belongs in this document and
+the desired-state manifest; the native qualification creates each declared
+client so an incompatible declaration cannot be accepted by stubs alone.

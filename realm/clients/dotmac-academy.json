@@ -1,7 +1,7 @@
 {
   "clientId": "dotmac-academy",
   "name": "Dotmac Academy",
-  "description": "Confidential server-side relying party for academy.dotmac.io staff sign-in (pilot cohort). Same security model as dotmac-workspace: a server-held secret, an HttpOnly cookie and a server-side single-use state store. The secret itself lives ONLY in OpenBao; see docs/SECRETS.md. Declared disabled until the Academy OIDC build is deployed with its secret delivered; see the rollout gate in realm/expected-clients.json.",
+  "description": "Confidential OIDC client for Dotmac Academy staff. Staged disabled; enable only for the approved login pilot after secret delivery. Uses Authorization Code with S256 PKCE. Secrets are managed outside this repository.",
   "protocol": "openid-connect",
   "enabled": false,
   "publicClient": false,

@@ -126,3 +126,11 @@ a workstation.
 - `dotmac_starter_mt/docs/inventories/mobile-application-sources.md` — findings
   R1 (no verified deep link) and R4 (the realm advertises `plain` PKCE and the
   `implicit` and `password` grants; the mitigation is per-client)
+
+The live admin scripts also require Python 3 for the isolated standard-library
+snapshot projection. They read Keycloak's server-masked partial export and
+persist only the allowlisted policy/declaration fields. The existing admin
+principal must already have the export permissions; a denied export does not
+trigger broader grants or an ordinary client-read fallback. See
+[the data boundary](docs/SECRETS.md) and
+[the representation contract](docs/POLICY.md#live-snapshot-representation).

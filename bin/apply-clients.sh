@@ -19,8 +19,7 @@
 #                       of the same keys; arrays compared sorted, an empty-string
 #                       attribute equals an absent one; live-only attribute keys
 #                       are listed by NAME only). `secret` and
-#                       attributes["client.secret.rotated"] are removed at capture
-#                       and never compared or printed)                  (false)
+#                       attributes["client.secret.rotated"] are never compared or printed)                  (false)
 #   APPLY_ONLY          comma-separated clientIds. Clients not listed get no create
 #                       and no update. A name that is not an applicable client in
 #                       the manifest is refused (exit 2). Empty = all   ()
@@ -38,8 +37,7 @@
 # (`-e KC_CLI_PASSWORD`), so it is on no argv, host or container. Each run uses
 # its own kcadm login cache and staging directory inside the container (a
 # mktemp -d, passed as `--config`), removed exactly on exit, so concurrent runs
-# cannot delete each other's login. Client reads have `.secret` and
-# attributes["client.secret.rotated"] stripped before any temp file.
+# cannot delete each other's login. Reads use a server-masked partial export and persist only its safe projection.
 
 set -euo pipefail
 
@@ -148,30 +146,75 @@ stage() { # stage <local-file> <in-container-path>
 # on no argv. kcadm reads KC_CLI_PASSWORD when --password is omitted.
 export KC_CLI_PASSWORD="$KC_ADMIN_PASSWORD"
 
-work="$(mktemp -d)"
+apply_complete=false
+work=""
 kc_dir=""
 kc_cfg=""
-# Best effort, however this script exits: remove THIS run's private directory in
-# the container (login cache + staged files, including after a failed create or
-# update). Exactly that path, never a shared one.
+# Only a single basename returned by our fixed mktemp template is owned. Never
+# use an unvalidated response as either a cache path or a recursive-remove path.
+valid_kc_dir() { [[ "$1" =~ ^/tmp/kcadm\.[[:alnum:]]+$ ]]; }
 cleanup() {
-	rm -rf "$work"
-	if [ -n "$kc_dir" ]; then
-		dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1 || true
+	local rc=$? cleanup_failed=0
+	trap - EXIT
+	# A signal during cleanup still changes a successful result to cancellation,
+	# but does not interrupt either independent cleanup attempt.
+	trap 'if [ "$rc" -eq 0 ]; then rc=130; fi' INT
+	trap 'if [ "$rc" -eq 0 ]; then rc=143; fi' TERM
+	trap 'if [ "$rc" -eq 0 ]; then rc=129; fi' HUP
+	if [ -n "$work" ]; then
+		if ! rm -rf -- "$work"; then cleanup_failed=1; fi
+		if [ -e "$work" ] || [ -L "$work" ]; then cleanup_failed=1; fi
 	fi
+	if [ -n "$kc_dir" ]; then
+		if ! valid_kc_dir "$kc_dir"; then
+			cleanup_failed=1
+		else
+			if ! dc exec -T "$KC_SERVICE" rm -rf "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+			# Translate test's 1 (absent) into remote success. An exec/transport
+			# failure, including status 1, must never count as absence evidence.
+			if ! dc exec -T "$KC_SERVICE" sh -c '
+				test -e "$1"
+				rc=$?
+				case "$rc" in 1) ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+				test -L "$1"
+				rc=$?
+				case "$rc" in 1) exit 0 ;; 0) exit 42 ;; *) exit "$rc" ;; esac
+			' sh "$kc_dir" </dev/null >/dev/null 2>&1; then cleanup_failed=1; fi
+		fi
+	fi
+	if [ "$cleanup_failed" -ne 0 ]; then
+		echo "apply-clients: cleanup unconfirmed; private temporary data may remain" >&2
+		if [ "$rc" -eq 0 ]; then rc=1; fi
+	fi
+	if [ "$rc" -eq 0 ] && [ "$apply_complete" = true ]; then
+		echo "apply-clients: desired state applied. bin/verify.sh is what proves it took."
+	fi
+	exit "$rc"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+work="$(mktemp -d)"
 
-kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null)"
-case "$kc_dir" in /tmp/kcadm.?*) ;; *) echo "apply-clients: could not create a private kcadm directory in the container" >&2; kc_dir=""; exit 1 ;; esac
+kc_dir="$(dc exec -T "$KC_SERVICE" mktemp -d /tmp/kcadm.XXXXXX </dev/null && printf .)" || { rc=$?; kc_dir=""; exit "$rc"; }
+# Preserve embedded/trailing newlines until validation; remove only mktemp's newline.
+kc_dir="${kc_dir%.}"
+kc_dir="${kc_dir%$'\n'}"
+if ! valid_kc_dir "$kc_dir"; then
+	echo "apply-clients: invalid private kcadm directory response" >&2
+	kc_dir=""
+	exit 1
+fi
 kc_cfg="$kc_dir/kcadm.config"
 
 dc exec -T -e KC_CLI_PASSWORD "$KC_SERVICE" \
 	/opt/keycloak/bin/kcadm.sh config credentials --server "$KC_INTERNAL_URL" --realm "$KC_ADMIN_REALM" --user "$KC_ADMIN_USER" --config "$kc_cfg" >/dev/null </dev/null
 
-# Only ids and names are needed from the list; .secret is stripped as it is
-# captured, before anything is written to disk.
-kcadm get clients -r "$KC_REALM" --fields id,clientId | jq 'map(del(.secret) | del(.attributes["client.secret.rotated"]))' >"$work/clients.json"
+# shellcheck source=bin/kcadm-snapshot.sh
+. "$REPO_ROOT/bin/kcadm-snapshot.sh"
+kcadm_snapshot "$work/snapshot.json"
+jq '.clients' "$work/snapshot.json" >"$work/clients.json"
 
 # Pass 1: plan. Nothing is written here.
 plan=()
@@ -202,13 +245,12 @@ fi
 
 # Field-level diff: declared keys vs the live value of the same keys, attributes
 # key by key. Arrays are compared sorted; an empty-string declared attribute
-# equals an absent live one. .secret and attributes["client.secret.rotated"] are
-# stripped at capture (and from the declared side). Live-only attribute keys are
+# equals an absent live one. Credential fields are excluded by the projection
+# (and from the declared side). Live-only attribute keys are
 # listed by NAME only, never by value.
 show_diff() { # show_diff <client_id> <uuid> <declared-file> (client_id is for the caller's log only)
 	local uuid="$2"
-	kcadm get "clients/$uuid" -r "$KC_REALM" |
-		jq 'del(.secret) | del(.attributes["client.secret.rotated"])' >"$work/live.json"
+	jq --arg id "$uuid" '.clients[] | select(.id == $id)' "$work/snapshot.json" >"$work/live.json"
 	local out names
 	out="$(jq -r --slurpfile live "$work/live.json" '
 		def norm: walk(if type == "array" then sort else . end);
@@ -220,9 +262,11 @@ show_diff() { # show_diff <client_id> <uuid> <declared-file> (client_id is for t
 		      | select(((($e.value | norm) != ($lv | norm))) and (($e.value == "" and $lv == null) | not))
 		      | "    attributes.\($e.key): declared=\($e.value | tojson) live=\($lv | tojson)" ] )
 		| .[]' "$3")"
-	names="$(jq -r --slurpfile live "$work/live.json" '
-		(del(.secret) | del(.attributes["client.secret.rotated"])) as $d | $live[0] as $l
-		| [ ($l.attributes // {}) | keys[] | select(. as $k | (($d.attributes // {}) | has($k)) | not) ] | join(", ")' "$3")"
+	names="$(jq -r --arg id "$uuid" --slurpfile declared "$3" '
+		[ (.attributeNames[$id] // [])[] ] +
+		[ .clients[] | select(.id == $id) | (.attributes // {}) | keys[]
+		  | select(. as $k | (($declared[0].attributes // {}) | has($k)) | not) ]
+		| unique | join(", ")' "$work/snapshot.json")"
 	if [ -z "$out" ]; then
 		echo "    no change"
 	else
@@ -258,4 +302,4 @@ for p in ${plan[@]+"${plan[@]}"}; do
 	dc exec -T "$KC_SERVICE" rm -f "$staged" </dev/null || true
 done
 
-echo "apply-clients: desired state applied. bin/verify.sh is what proves it took."
+apply_complete=true
